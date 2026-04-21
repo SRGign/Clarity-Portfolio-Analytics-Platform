@@ -1,0 +1,40 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/*.log
+frontend/.playwright-cli/
+frontend/tsconfig.tsbuildinfo
+frontend/screenshots/
+
+# Backend
+backend/.gradle/
+backend/.gradle-user-home/
+backend/build/
+backend/bin/
+backend/*.log
+backend/*.db
+backend/*.db-*
+backend/gradle-*/
+backend/*.zip
+
+# Local assets and research
+references/
+screenshots/
+stitch/
+.agents/
+.claude/
+.codex/
+.planning/

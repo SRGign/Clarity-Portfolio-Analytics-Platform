@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: pnl-tracker-backend
+  datasource:
+    url: ${PORTFOLIO_DB_URL:jdbc:sqlite:./pnl-tracker.db}
+    driver-class-name: org.sqlite.JDBC
+  sql:
+    init:
+      mode: always
+
+portfolio:
+  provider: alchemy
+  cache-ttl-seconds: 180
+  async:
+    alchemy-concurrency: ${ALCHEMY_CONCURRENCY:3}
+    alchemy-queue-capacity: ${ALCHEMY_QUEUE_CAPACITY:32}
+  alchemy:
+    base-url: https://api.g.alchemy.com
+    api-key: ${ALCHEMY_API_KEY:docs-demo}
+  goldrush:
+    enabled: ${PORTFOLIO_GOLDRUSH_ENABLED:true}
+    base-url: https://api.covalenthq.com
+    api-key: ${PORTFOLIO_GOLDRUSH_API_KEY:${GOLDRUSH_API_KEY:}}
+    timeout-seconds: ${PORTFOLIO_GOLDRUSH_TIMEOUT_SECONDS:20}
+  defi:
+    enabled: ${PORTFOLIO_DEFI_ENABLED:true}
+    protocols:
+      - protocolKey: aave
+        protocolName: Aave
+        enabled: true
+        networks:
+          - network: eth-mainnet
+            enabled: true
+            wrapperTokens:
+              - tokenAddress: 0x1a88df1cfe15af22b3c4c783d4e6f7f9e0c1885d
+                positionType: staking
+                underlyingTokenAddress: 0x1a88df1cfe15af22b3c4c783d4e6f7f9e0c1885d
+                underlyingSymbol: stkGHO
+                underlyingName: stk GHO
+                underlyingDecimals: 18
+                alreadyCountedInSpotTotals: true
+      - protocolKey: morpho
+        protocolName: Morpho
+        enabled: true
+        networks:
+          - network: eth-mainnet
+            enabled: true
+  lending:
+    wrapper-tokens: []
