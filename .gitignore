@@ -13,8 +13,15 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/.next/
+frontend/.turbo/
+frontend/.cache/
+frontend/.vercel/
 frontend/out/
 frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
 frontend/.playwright-cli/
 frontend/tsconfig.tsbuildinfo
 frontend/screenshots/
@@ -27,6 +34,10 @@ backend/bin/
 backend/*.log
 backend/*.db
 backend/*.db-*
+backend/*.sqlite
+backend/*.sqlite-*
+backend/*.mv.db
+backend/*.trace.db
 backend/gradle-*/
 backend/*.zip
 

@@ -15,10 +15,6 @@ public class ZerionDeFiController {
         this.service = service;
     }
 
-    // TODO(security): Add authentication guard before going to production.
-    // Wallet addresses are public on-chain data (read-only), but unauthenticated access
-    // allows any caller to exhaust the application's Zerion API quota.
-    // Minimum: require an X-Internal-Token header or integrate with existing auth.
     @GetMapping("/{address}/defi-positions")
     public ZerionDeFiResponse getDeFiPositions(@PathVariable String address) {
         ZerionApiClient.ZerionFetchResult result = service.getPositions(address);

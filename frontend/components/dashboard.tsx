@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
+import { DefiPositionsBlock } from "@/components/defi-positions-block";
 import {
   computePeriodDelta,
   fetchChains,
@@ -599,135 +600,7 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                {/* DeFi Positions */}
-                <div className="s-panel">
-                  <div className="s-panel-hd s-panel-hd-violet">
-                    <span>DEFI_POSITIONS_MATRIX</span>
-                    <div className="s-panel-hd-controls">
-                      <span className="s-badge">{activeDefiPositions.length} LEGS</span>
-                      <span className="s-badge">{defiProtocolGroups.length} PROTOCOLS</span>
-                      {activeDefiSummary?.partialCoverage && <span className="s-badge">PARTIAL</span>}
-                    </div>
-                  </div>
-                  <div className="s-panel-body s-defi-panel">
-                    {activeDefiSummary && (
-                      <div className="s-defi-summary-grid">
-                        <div className="s-defi-metric-card">
-                          <span>Gross Supply</span>
-                          <strong className="mono">
-                            {formatCurrency(activeDefiSummary.visibleSupplyUsd ?? 0)}
-                          </strong>
-                          <p>Capital supplied into protocol markets.</p>
-                        </div>
-                        <div className="s-defi-metric-card">
-                          <span>Gross Debt</span>
-                          <strong className="mono tone-negative">
-                            {formatCurrency(activeDefiSummary.visibleDebtUsd ?? 0)}
-                          </strong>
-                          <p>Borrowed exposure visible across protocol legs.</p>
-                        </div>
-                        <div className="s-defi-metric-card">
-                          <span>Net DeFi</span>
-                          <strong className={`mono ${toneClass(activeDefiSummary.visibleNetUsd ?? 0)}`}>
-                            {formatCurrency(activeDefiSummary.visibleNetUsd ?? 0)}
-                          </strong>
-                          <p>
-                            {activeDefiSummary.detectionModes.length > 0
-                              ? `Sources: ${activeDefiSummary.detectionModes.join(", ")}`
-                              : "Protocol-aware and fallback positions combined."}
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
-                    {activeDefiPositions.length === 0 ? (
-                      <div className="s-defi-empty">
-                        <strong>DeFi positions not detected yet.</strong>
-                        <p>
-                          The block is live now, but the backend still needs protocol metadata or protocol-aware clients
-                          to turn wallet token balances into Aave, Morpho, staking, and lending positions.
-                        </p>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="s-defi-protocol-grid">
-                          {defiProtocolGroups.map((group) => (
-                            <div key={group.protocolKey} className="s-defi-protocol-card">
-                              <div className="s-defi-protocol-topline">
-                                <span className="s-defi-protocol-name">{group.protocolName}</span>
-                                <strong className={`mono ${toneClass(group.netUsd)}`}>
-                                  {formatCurrency(group.netUsd)}
-                                </strong>
-                              </div>
-                              <div className="s-defi-protocol-meta">
-                                <span>{group.positions.length} legs</span>
-                                <span>
-                                  {group.positions.filter((pos) => isDebtPosition(pos.positionSide)).length} debt
-                                </span>
-                                <span>
-                                  {group.positions.filter((pos) => !isDebtPosition(pos.positionSide)).length} supply
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="s-table-shell">
-                          <table className="s-table s-defi-table">
-                            <thead>
-                              <tr>
-                                <th>PROTOCOL</th>
-                                <th>ASSET</th>
-                                <th>NETWORK</th>
-                                <th>TYPE</th>
-                                <th>MODE</th>
-                                <th>COVERAGE</th>
-                                <th className="align-right">SUPPLY</th>
-                                <th className="align-right">DEBT</th>
-                                <th className="align-right">NET</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {activeDefiPositions.map((position) => (
-                                <tr key={position.positionId}>
-                                  <td data-label="Protocol">
-                                    <div className="s-defi-cell">
-                                      <strong>{position.protocolName}</strong>
-                                      <span className="mono">{displayPositionSide(position.positionSide)}</span>
-                                    </div>
-                                  </td>
-                                  <td data-label="Asset">
-                                    <div className="s-defi-cell">
-                                      <strong>{position.underlyingSymbol}</strong>
-                                      <span>{position.underlyingName || "Protocol exposure"}</span>
-                                    </div>
-                                  </td>
-                                  <td data-label="Network"><span className="s-tag">{displayNetwork(position.network)}</span></td>
-                                  <td data-label="Type"><span className="s-tag">{displayPositionType(position)}</span></td>
-                                  <td data-label="Mode"><span className="s-tag">{displayDetectionMode(position.detectionMode)}</span></td>
-                                  <td data-label="Coverage">
-                                    <span className={`s-tag ${isPartialCoverage(position.coverage) ? "s-tag-amber" : ""}`}>
-                                      {displayCoverage(position.coverage)}
-                                    </span>
-                                  </td>
-                                  <td data-label="Supply" className="align-right mono">
-                                    {formatCurrency(position.supplyUsd ?? 0)}
-                                  </td>
-                                  <td data-label="Debt" className="align-right mono tone-negative">
-                                    {formatCurrency(position.debtUsd ?? 0)}
-                                  </td>
-                                  <td data-label="Net" className={`align-right mono s-bold ${toneClass(position.netUsd ?? 0)}`}>
-                                    {formatCurrency(position.netUsd ?? 0)}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
+                <DefiPositionsBlock wallets={wallets} />
 
                 {/* Asset Inventory */}
                 <div className="s-panel">

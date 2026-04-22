@@ -50,3 +50,8 @@ portfolio:
             enabled: true
   lending:
     wrapper-tokens: []
+
+zerion:
+  api:
+    base-url: https://api.zerion.io/v1
+    api-key: ${ZERION_API_KEY:}

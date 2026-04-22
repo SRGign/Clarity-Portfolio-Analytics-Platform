@@ -15,6 +15,7 @@ import java.util.concurrent.FutureTask;
 public class ZerionDeFiService {
 
     private static final Duration CACHE_TTL = Duration.ofMinutes(5);
+    private static final double MIN_VISIBLE_POSITION_USD = 1.0d;
 
     private record CachedEntry(List<ZerionPosition> positions, boolean stale, Instant expiresAt) {}
 
@@ -62,21 +63,32 @@ public class ZerionDeFiService {
 
     private CachedEntry fetchAndCache(String normalizedAddress) {
         ZerionApiClient.ZerionFetchResult result = client.getDeFiPositions(normalizedAddress);
-        List<ZerionPosition> sorted = sortByGroupId(result.positions());
+        List<ZerionPosition> sorted = sortVisiblePositions(result.positions());
         Instant expiresAt = Instant.now().plus(CACHE_TTL);
         CachedEntry entry = new CachedEntry(sorted, result.stale(), expiresAt);
         cache.put(normalizedAddress, entry);
         return entry;
     }
 
-    private List<ZerionPosition> sortByGroupId(List<ZerionPosition> positions) {
+    private List<ZerionPosition> sortVisiblePositions(List<ZerionPosition> positions) {
         if (positions == null || positions.isEmpty()) return List.of();
 
-        List<ZerionPosition> mutable = new ArrayList<>(positions);
-        mutable.sort(Comparator.comparing(
-            ZerionPosition::groupId,
-            Comparator.nullsLast(Comparator.naturalOrder())
-        ));
+        List<ZerionPosition> mutable = positions.stream()
+                .filter(this::isVisiblePosition)
+                .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
+        mutable.sort(
+                Comparator.comparing(
+                        (ZerionPosition position) -> position.groupId() != null ? position.groupId() : position.poolAddress(),
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(ZerionPosition::protocolName, Comparator.nullsLast(String::compareToIgnoreCase))
+                        .thenComparing(ZerionPosition::value, Comparator.nullsLast(Comparator.reverseOrder()))
+        );
         return List.copyOf(mutable);
+    }
+
+    private boolean isVisiblePosition(ZerionPosition position) {
+        return position != null
+                && position.value() != null
+                && position.value() >= MIN_VISIBLE_POSITION_USD;
     }
 }
