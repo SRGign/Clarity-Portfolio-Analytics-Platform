@@ -70,6 +70,9 @@ public class ZerionApiClient {
                         .onStatus(status -> status.value() == 503, (req, resp) -> {
                             throw new RetryableException(503);
                         })
+                        .onStatus(status -> status.is4xxClientError() && status.value() != 429, (req, resp) -> {
+                            throw new NonRetryableException(resp.getStatusCode().value());
+                        })
                         .body(String.class);
 
                 long durationMs = System.currentTimeMillis() - startMs;
@@ -90,6 +93,11 @@ public class ZerionApiClient {
                     Thread.currentThread().interrupt();
                     return new ZerionFetchResult(List.of(), true);
                 }
+            } catch (NonRetryableException e) {
+                long durationMs = System.currentTimeMillis() - startMs;
+                log.error("Zerion non-retryable HTTP {} for address={} durationMs={} — check API key / endpoint",
+                        e.status, address, durationMs);
+                return new ZerionFetchResult(List.of(), true);
             } catch (Exception e) {
                 long durationMs = System.currentTimeMillis() - startMs;
                 log.warn("Zerion GET {} failed durationMs={} error={}", url, durationMs, e.getMessage());
@@ -173,6 +181,14 @@ public class ZerionApiClient {
         final int status;
         RetryableException(int status) {
             super("HTTP " + status);
+            this.status = status;
+        }
+    }
+
+    static class NonRetryableException extends RuntimeException {
+        final int status;
+        NonRetryableException(int status) {
+            super("HTTP " + status + " (non-retryable)");
             this.status = status;
         }
     }
