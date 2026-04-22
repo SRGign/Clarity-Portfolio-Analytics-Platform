@@ -26,10 +26,11 @@ public class ZerionApiClient {
 
     private final RestClient restClient;
     private final ZerionProperties properties;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    public ZerionApiClient(ZerionProperties properties) {
+    public ZerionApiClient(ZerionProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
+        this.objectMapper = objectMapper;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(Duration.ofSeconds(10));
         requestFactory.setReadTimeout(Duration.ofSeconds(35));
