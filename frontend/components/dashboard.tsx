@@ -129,9 +129,13 @@ export function Dashboard() {
 
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
   const totalUsd = summary?.totalUsd ?? 0;
-  const delta = useMemo(
+  const chartDelta = useMemo(
     () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, period),
     [history?.points, summary?.totalUsd, period],
+  );
+  const heroDelta = useMemo(
+    () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, "24h"),
+    [history?.points, summary?.totalUsd],
   );
   const chartPoints = useMemo(
     () => buildChartPoints(history?.points ?? [], summary?.totalUsd ?? null, period),
@@ -159,7 +163,7 @@ export function Dashboard() {
       allocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? allocationChartRows[0] ?? null,
     [allocationChartRows, hoveredAllocationKey],
   );
-  const overviewLegendRows = useMemo(() => allocationChartRows.slice(0, 6), [allocationChartRows]);
+  const overviewLegendRows = useMemo(() => allocationChartRows, [allocationChartRows]);
   const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
   const activity = useMemo(
     () => buildActivity(wallets, history?.points ?? [], lastRefresh, summary?.totalUsd ?? null),
@@ -268,7 +272,7 @@ export function Dashboard() {
 
     const loadHistory = async () => {
       try {
-        const response = await fetchPortfolioHistory(wallets, selectedChains, period);
+        const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
         setHistory(response);
         setHistoryWarning(
           response.partial
@@ -476,10 +480,10 @@ export function Dashboard() {
               <p className="s-kicker">TOTAL_NET_WORTH</p>
               <div className="s-hero-row">
                 <h1 className="s-hero-value">{formatCurrency(totalUsd)}</h1>
-                {delta.amount !== null && (
-                  <div className={`s-delta-badge ${toneClass(delta.amount)}`}>
-                    <span className="s-delta-pct">{formatPercent(delta.percentage)}</span>
-                    <span className="s-delta-amt mono">{formatCurrency(delta.amount)}</span>
+                {heroDelta.amount !== null && (
+                  <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
+                    <span className="s-delta-pct">{formatPercent(heroDelta.percentage)}</span>
+                    <span className="s-delta-amt mono">{formatCurrency(heroDelta.amount)}</span>
                   </div>
                 )}
               </div>
@@ -567,8 +571,8 @@ export function Dashboard() {
                       <div className="s-ring-layout">
                         <div>
                           <div className="s-mega">{formatCurrency(totalUsd)}</div>
-                          <div className={`s-delta-line ${toneClass(delta.amount)}`}>
-                            {delta.amount === null ? "Waiting for baseline" : `${formatCurrency(delta.amount)} / ${formatPercent(delta.percentage)}`}
+                          <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
+                            {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
                           </div>
                         </div>
                         <AllocationDonutChart
@@ -580,14 +584,32 @@ export function Dashboard() {
                       </div>
                     ) : (
                       <>
-                        <div className="s-alloc-strip">
-                          {allocationChartRows.slice(0, 8).map((row) => (
-                            <span key={allocationRowKey(row)} style={{ width: `${row.share}%`, backgroundColor: row.color }} />
-                          ))}
+                        <div className="s-alloc-strip" onMouseLeave={() => setHoveredAllocationKey(null)}>
+                          {allocationChartRows.map((row) => {
+                            const rowKey = allocationRowKey(row);
+                            const isActive = rowKey === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null);
+                            return (
+                              <button
+                                key={rowKey}
+                                type="button"
+                                className={`s-alloc-strip-segment ${isActive ? "is-active" : ""}`}
+                                style={{ width: `${row.share}%`, backgroundColor: row.color }}
+                                aria-label={`${row.displayName} ${formatCurrency(row.valueUsd)} ${formatShare(row.share)}`}
+                                onMouseEnter={() => setHoveredAllocationKey(rowKey)}
+                                onFocus={() => setHoveredAllocationKey(rowKey)}
+                                onBlur={() => setHoveredAllocationKey(null)}
+                              />
+                            );
+                          })}
                         </div>
                         <div className="s-alloc-legend">
                           {overviewLegendRows.map((row) => (
-                            <div key={allocationRowKey(row)} className="s-alloc-legend-row">
+                            <div
+                              key={allocationRowKey(row)}
+                              className={`s-alloc-legend-row ${allocationRowKey(row) === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null) ? "is-active" : ""}`}
+                              onMouseEnter={() => setHoveredAllocationKey(allocationRowKey(row))}
+                              onMouseLeave={() => setHoveredAllocationKey(null)}
+                            >
                               <span className="s-alloc-swatch" style={{ backgroundColor: row.color }} />
                               <strong className="s-alloc-name">{row.displayName}</strong>
                               <span className="s-alloc-val mono">{formatCurrency(row.valueUsd)}</span>
@@ -723,7 +745,7 @@ export function Dashboard() {
                     </div>
                     <div className="s-readout-row">
                       <span className="s-readout-label">DELTA_PERIOD</span>
-                      <strong className="s-readout-val mono">{delta.label}</strong>
+                      <strong className="s-readout-val mono">{chartDelta.label}</strong>
                     </div>
                   </div>
                 </div>
@@ -848,22 +870,28 @@ function Chart({ points }: { points: ChartPoint[] }) {
     const y = height - padBottom - ((point.value - floor) / range) * (height - padTop - padBottom);
     return { ...point, x, y };
   });
+  const interactiveCoords = coords.map((point, index) => {
+    const previousX = index === 0 ? padLeft : (coords[index - 1].x + point.x) / 2;
+    const nextX = index === coords.length - 1 ? width - padRight : (point.x + coords[index + 1].x) / 2;
+    return {
+      ...point,
+      hitStart: previousX,
+      hitWidth: Math.max(nextX - previousX, 18),
+    };
+  });
   const linePath = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
   const areaPath = `${linePath} L ${coords[coords.length - 1].x.toFixed(2)} ${(height - padBottom).toFixed(2)} L ${coords[0].x.toFixed(2)} ${(height - padBottom).toFixed(2)} Z`;
   const step = Math.max(1, Math.ceil(points.length / 5));
 
-  const handlePointHover = (
-    event: React.MouseEvent<SVGCircleElement, MouseEvent>,
-    point: ChartPoint,
-  ) => {
+  const focusPoint = (point: typeof coords[number]) => {
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect) {
       return;
     }
     setHoveredPoint({
       point,
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
+      x: (point.x / width) * rect.width,
+      y: (point.y / height) * rect.height,
       width: rect.width,
       height: rect.height,
     });
@@ -875,7 +903,12 @@ function Chart({ points }: { points: ChartPoint[] }) {
 
   return (
     <div className="chart-viewport" ref={viewportRef}>
-      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" aria-label="Portfolio chart">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="chart-svg"
+        aria-label="Portfolio chart"
+        onMouseLeave={() => setHoveredPoint(null)}
+      >
         <rect x={padLeft} y={padTop} width={width - padLeft - padRight} height={height - padTop - padBottom} className="chart-frame" />
         <line x1={padLeft} y1={padTop} x2={padLeft} y2={height - padBottom} className="chart-axis-line" />
         <line x1={padLeft} y1={height - padBottom} x2={width - padRight} y2={height - padBottom} className="chart-axis-line" />
@@ -891,6 +924,18 @@ function Chart({ points }: { points: ChartPoint[] }) {
         })}
         <path d={areaPath} className="chart-area" />
         <path d={linePath} className={`chart-line ${coords[coords.length - 1].value >= coords[0].value ? "is-up" : "is-down"}`} />
+        {interactiveCoords.map((point) => (
+          <rect
+            key={`${point.localDate}-zone`}
+            x={point.hitStart}
+            y={padTop}
+            width={point.hitWidth}
+            height={height - padTop - padBottom}
+            className="chart-hit-zone"
+            onMouseEnter={() => focusPoint(point)}
+            onMouseMove={() => focusPoint(point)}
+          />
+        ))}
         {hoveredCoord ? (
           <g className="chart-focus-layer">
             <line x1={hoveredCoord.x} y1={padTop} x2={hoveredCoord.x} y2={height - padBottom} className="chart-focus-line" />
@@ -905,9 +950,7 @@ function Chart({ points }: { points: ChartPoint[] }) {
               cy={point.y}
               r={point.current ? 4.5 : 3.25}
               className={`chart-dot ${point.current ? "is-current" : ""}`}
-              onMouseEnter={(event) => handlePointHover(event, point)}
-              onMouseMove={(event) => handlePointHover(event, point)}
-              onMouseLeave={() => setHoveredPoint(null)}
+              pointerEvents="none"
             />
             {(index % step === 0 || index === coords.length - 1) && <text x={point.x} y={height - 8} textAnchor="middle" className="chart-label">{point.label}</text>}
           </g>
@@ -1072,7 +1115,10 @@ function AllocationDetailList({
 }
 
 function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUsd: number | null, period: Period): ChartPoint[] {
-  let points = historyPoints.map((point) => ({
+  let points = historyPoints
+    .slice()
+    .sort((left, right) => left.localDate.localeCompare(right.localDate))
+    .map((point) => ({
     label: formatShortDate(point.localDate),
     localDate: point.localDate,
     value: point.totalUsd,
@@ -1099,7 +1145,9 @@ function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUs
     }
   }
 
-  if (period === "24h") return points.slice(-2);
+  if (period === "24h") {
+    return points.slice(-Math.min(points.length, 7));
+  }
   if (period === "7d") return points.slice(-8);
   if (period === "30d") return points.slice(-31);
   return points;

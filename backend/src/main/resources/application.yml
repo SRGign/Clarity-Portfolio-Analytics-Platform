@@ -25,31 +25,6 @@ portfolio:
     base-url: https://api.covalenthq.com
     api-key: ${PORTFOLIO_GOLDRUSH_API_KEY:${GOLDRUSH_API_KEY:}}
     timeout-seconds: ${PORTFOLIO_GOLDRUSH_TIMEOUT_SECONDS:20}
-  defi:
-    enabled: ${PORTFOLIO_DEFI_ENABLED:true}
-    protocols:
-      - protocolKey: aave
-        protocolName: Aave
-        enabled: true
-        networks:
-          - network: eth-mainnet
-            enabled: true
-            wrapperTokens:
-              - tokenAddress: 0x1a88df1cfe15af22b3c4c783d4e6f7f9e0c1885d
-                positionType: staking
-                underlyingTokenAddress: 0x1a88df1cfe15af22b3c4c783d4e6f7f9e0c1885d
-                underlyingSymbol: stkGHO
-                underlyingName: stk GHO
-                underlyingDecimals: 18
-                alreadyCountedInSpotTotals: true
-      - protocolKey: morpho
-        protocolName: Morpho
-        enabled: true
-        networks:
-          - network: eth-mainnet
-            enabled: true
-  lending:
-    wrapper-tokens: []
 
 zerion:
   api:

@@ -69,6 +69,10 @@ public class PortfolioController {
     @PostMapping("/portfolio/overview")
     public PortfolioOverviewResponse overview(@Valid @RequestBody PortfolioRequest request) {
         PortfolioAnalysis overview = portfolioOverviewService.getOverview(request.addresses(), request.chains());
+        portfolioHistoryService.recordLiveSnapshot(
+                request.addresses(),
+                request.chains(),
+                overview.summary().totalUsd());
         return new PortfolioOverviewResponse(
                 toSummaryResponse(overview),
                 toAssetRows(overview.assets()),
