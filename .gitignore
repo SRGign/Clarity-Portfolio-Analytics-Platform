@@ -1,8 +1,23 @@
 # Environment and secrets
 .env
 .env.*
+*.env
+*.env.*
+.envrc
 !.env.example
 !.env.local.example
+*.pem
+*.key
+*.p8
+*.p12
+*.keystore
+*.secret
+*.secret.*
+secrets/
+**/secrets/
+*.local.json
+*.local.yml
+*.local.yaml
 
 # OS and editor
 .DS_Store
@@ -25,6 +40,11 @@ frontend/pnpm-debug.log*
 frontend/.playwright-cli/
 frontend/tsconfig.tsbuildinfo
 frontend/screenshots/
+
+# Solana DeFi worker
+solana-defi-worker/node_modules/
+solana-defi-worker/dist/
+solana-defi-worker/*.log
 
 # Backend
 backend/.gradle/
@@ -49,3 +69,14 @@ stitch/
 .claude/
 .codex/
 .planning/
+
+# Local planning, AI workflow outputs, and private verification snapshots
+PLAN.md
+**/PLAN.md
+**/readiness-snapshot.md
+*.local.md
+*.ai.md
+building-codex/
+building codex/
+
+solana-defi-worker/README.md

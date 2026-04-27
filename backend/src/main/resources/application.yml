@@ -25,6 +25,8 @@ portfolio:
     base-url: https://api.covalenthq.com
     api-key: ${PORTFOLIO_GOLDRUSH_API_KEY:${GOLDRUSH_API_KEY:}}
     timeout-seconds: ${PORTFOLIO_GOLDRUSH_TIMEOUT_SECONDS:20}
+    solana-balances-enabled: ${PORTFOLIO_GOLDRUSH_SOLANA_BALANCES_ENABLED:true}
+    solana-chain-name: ${PORTFOLIO_GOLDRUSH_SOLANA_CHAIN_NAME:solana-mainnet}
 
 zerion:
   api:

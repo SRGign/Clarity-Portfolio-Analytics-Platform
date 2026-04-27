@@ -99,6 +99,8 @@ public class PortfolioProperties {
         private String baseUrl = "https://api.covalenthq.com";
         private String apiKey = "";
         private int timeoutSeconds = 20;
+        private boolean solanaBalancesEnabled = true;
+        private String solanaChainName = "solana-mainnet";
 
         public boolean isEnabled() {
             return enabled;
@@ -130,6 +132,22 @@ public class PortfolioProperties {
 
         public void setTimeoutSeconds(int timeoutSeconds) {
             this.timeoutSeconds = timeoutSeconds;
+        }
+
+        public boolean isSolanaBalancesEnabled() {
+            return solanaBalancesEnabled;
+        }
+
+        public void setSolanaBalancesEnabled(boolean solanaBalancesEnabled) {
+            this.solanaBalancesEnabled = solanaBalancesEnabled;
+        }
+
+        public String getSolanaChainName() {
+            return solanaChainName;
+        }
+
+        public void setSolanaChainName(String solanaChainName) {
+            this.solanaChainName = solanaChainName;
         }
     }
 
