@@ -60,23 +60,3 @@ backend/*.mv.db
 backend/*.trace.db
 backend/gradle-*/
 backend/*.zip
-
-# Local assets and research
-references/
-screenshots/
-stitch/
-.agents/
-.claude/
-.codex/
-.planning/
-
-# Local planning, AI workflow outputs, and private verification snapshots
-PLAN.md
-**/PLAN.md
-**/readiness-snapshot.md
-*.local.md
-*.ai.md
-building-codex/
-building codex/
-
-solana-defi-worker/README.md
