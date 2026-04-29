@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { WalletRecord } from "@/types/portfolio";
 
@@ -39,6 +39,34 @@ type RawDefiPosition = {
   absoluteChange1d?: number | null;
   change24hPercent?: number | null;
   percentChange1d?: number | null;
+};
+
+type WorkerPositionToken = {
+  mint: string;
+  symbol: string;
+  decimals: number;
+  amount: number;
+  priceUsd: number;
+  valueUsd: number;
+};
+
+type WorkerPosition = {
+  protocolId: string;
+  protocolName: string;
+  category: string;
+  positionType: string;
+  positionId: string;
+  tokens: WorkerPositionToken[];
+  totalValueUsd: number;
+  pendingRewards?: WorkerPositionToken[];
+  metadata?: Record<string, unknown>;
+};
+
+type WorkerPositionsResponse = {
+  walletAddress: string;
+  fetchedAt: string;
+  positions: WorkerPosition[];
+  errors: Array<{ protocolId: string; message: string }>;
 };
 
 type DefiPosition = {
@@ -80,6 +108,7 @@ type DefiState = {
   totalValueUsd: number;
   positions: DefiPosition[];
   stale: boolean;
+  sourceFailures: string[];
 };
 
 export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
@@ -87,19 +116,24 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
     totalValueUsd: 0,
     positions: [],
     stale: false,
+    sourceFailures: [],
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [gridWidth, setGridWidth] = useState(0);
   const groupsRef = useRef<HTMLDivElement | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
+  const loadPositions = useCallback(async () => {
+    activeRequestRef.current?.abort();
+
     if (wallets.length === 0) {
       setState({
         totalValueUsd: 0,
         positions: [],
         stale: false,
+        sourceFailures: [],
       });
       setLoading(false);
       setError(null);
@@ -107,68 +141,87 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
     }
 
     const controller = new AbortController();
+    activeRequestRef.current = controller;
 
-    const loadPositions = async () => {
-      setLoading(true);
-      setError(null);
+    setLoading(true);
+    setError(null);
 
-      try {
-        const responses = await Promise.all(
-          wallets.map(async (wallet) => {
-            const response = await fetch(
-              `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/defi-positions`,
-              {
-                cache: "no-store",
-                signal: controller.signal,
-              },
-            );
+    try {
+      const results = await Promise.allSettled(
+        wallets.map(async (wallet) => {
+          const [evmResult, solanaResult] = await Promise.allSettled([
+            fetchEvmPositions(wallet, controller.signal),
+            fetchSolanaWorkerPositions(wallet, controller.signal),
+          ]);
 
-            if (!response.ok) {
-              throw new Error(`Failed to load DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
-            }
+          const positions: RawDefiPosition[] = [
+            ...(evmResult.status === "fulfilled" ? evmResult.value : []),
+            ...(solanaResult.status === "fulfilled" ? solanaResult.value : []),
+          ];
 
-            const payload = (await response.json()) as RawDefiResponse;
-            return {
-              wallet,
-              payload,
-            };
-          }),
-        );
+          const evmTotal = evmResult.status === "fulfilled"
+            ? evmResult.value.reduce((sum, position) => sum + (position.valueUsd ?? position.value ?? 0), 0)
+            : 0;
 
-        const positions = responses.flatMap(({ wallet, payload }) =>
-          (payload.positions ?? []).map((position, index) =>
-            normalizeDefiPosition(position, wallet, index),
-          ),
-        );
-        const totalValueUsd = responses.reduce(
-          (sum, { payload }) => sum + (payload.totalUsd ?? payload.totalValueUsd ?? 0),
-          0,
-        );
-        const stale = responses.some(({ payload }) => payload.stale === true);
+          const solanaTotal = solanaResult.status === "fulfilled"
+            ? solanaResult.value.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0)
+            : 0;
 
-        setState({
-          totalValueUsd,
-          positions,
-          stale,
-        });
-      } catch (loadError) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setError(loadError instanceof Error ? loadError.message : "Failed to load DeFi positions.");
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
+          const failures: string[] = [
+            ...(evmResult.status === "rejected" ? ["EVM"] : []),
+            ...(solanaResult.status === "rejected" ? ["Solana"] : []),
+          ];
+
+          return { wallet, positions, totalValueUsd: evmTotal + solanaTotal, failures };
+        }),
+      );
+
+      if (controller.signal.aborted) {
+        return;
       }
-    };
 
+      const fulfilledResults = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const positions = fulfilledResults.flatMap(({ wallet, positions: walletPositions }) =>
+        walletPositions.map((position, index) => normalizeDefiPosition(position, wallet, index)),
+      );
+      const totalValueUsd = fulfilledResults.reduce(
+        (sum, result) => sum + result.totalValueUsd,
+        0,
+      );
+      const sourceFailures = uniqueSourceFailures(
+        fulfilledResults.flatMap((result) => result.failures),
+      );
+
+      setState({
+        totalValueUsd,
+        positions,
+        stale: false,
+        sourceFailures,
+      });
+    } catch (loadError) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      setError(loadError instanceof Error ? loadError.message : "Failed to load DeFi positions.");
+    } finally {
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = null;
+      }
+    }
+  }, [wallets]);
+
+  useEffect(() => {
     void loadPositions();
 
     return () => {
-      controller.abort();
+      activeRequestRef.current?.abort();
     };
-  }, [wallets]);
+  }, [loadPositions]);
 
   const groupedPositions = useMemo(() => buildDefiGroups(state.positions), [state.positions]);
   const columns = useMemo(() => inferColumns(gridWidth), [gridWidth]);
@@ -476,6 +529,82 @@ function LoadingSkeleton() {
       ))}
     </div>
   );
+}
+
+async function fetchEvmPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load EVM DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as RawDefiResponse;
+  return payload.positions ?? [];
+}
+
+async function fetchSolanaWorkerPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/solana/defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load Solana DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as WorkerPositionsResponse;
+  const workerUnavailable = payload.errors?.some((error) => error.protocolId === "worker") ?? false;
+
+  if (workerUnavailable) {
+    throw new Error("Solana worker failed to load positions.");
+  }
+
+  return (payload.positions ?? []).flatMap((position) => [
+    ...(position.tokens ?? []).map((token) => mapWorkerPositionToRaw(position, token)),
+    ...(position.pendingRewards ?? []).map((token) => mapWorkerPositionToRaw(position, token, "reward")),
+  ]);
+}
+
+function mapWorkerPositionToRaw(
+  workerPosition: WorkerPosition,
+  token: WorkerPositionToken,
+  positionType = workerPosition.positionType,
+): RawDefiPosition {
+  return {
+    positionType,
+    protocol: workerPosition.protocolId,
+    protocolName: workerPosition.protocolName,
+    chain: "solana",
+    chainId: "solana",
+    tokenSymbol: token.symbol,
+    tokenName: token.symbol,
+    tokenIconUrl: null,
+    tokenAmount: token.amount,
+    quantity: token.amount,
+    valueUsd: token.valueUsd,
+    value: token.valueUsd,
+    groupId: workerPosition.positionId,
+    poolAddress: null,
+    protocolUrl: null,
+    protocolModule: workerPosition.category ?? null,
+    change24hUsd: null,
+    absoluteChange1d: null,
+    change24hPercent: null,
+    percentChange1d: null,
+  };
+}
+
+function uniqueSourceFailures(failures: string[]): string[] {
+  return [...new Set(failures)];
 }
 
 function buildDefiGroups(positions: DefiPosition[]): DefiGroup[] {
