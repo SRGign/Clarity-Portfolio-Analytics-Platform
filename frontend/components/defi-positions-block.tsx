@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { isValidEvmAddress, isValidSolanaAddress } from "@/lib/portfolio";
 import type { WalletRecord } from "@/types/portfolio";
 
 const API_BASE_URL =
@@ -149,30 +150,21 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
     try {
       const results = await Promise.allSettled(
         wallets.map(async (wallet) => {
-          const [evmResult, solanaResult] = await Promise.allSettled([
-            fetchEvmPositions(wallet, controller.signal),
-            fetchSolanaWorkerPositions(wallet, controller.signal),
-          ]);
+          const sourceRequests = buildDefiSourceRequests(wallet, controller.signal);
+          const sourceResults = await Promise.allSettled(sourceRequests.map((source) => source.fetcher));
 
-          const positions: RawDefiPosition[] = [
-            ...(evmResult.status === "fulfilled" ? evmResult.value : []),
-            ...(solanaResult.status === "fulfilled" ? solanaResult.value : []),
-          ];
+          const positions = sourceResults.flatMap((result) =>
+            result.status === "fulfilled" ? result.value : [],
+          );
+          const totalValueUsd = positions.reduce(
+            (sum, position) => sum + (position.valueUsd ?? position.value ?? 0),
+            0,
+          );
+          const failures = sourceResults.flatMap((result, index) =>
+            result.status === "rejected" ? [sourceRequests[index].label] : [],
+          );
 
-          const evmTotal = evmResult.status === "fulfilled"
-            ? evmResult.value.reduce((sum, position) => sum + (position.valueUsd ?? position.value ?? 0), 0)
-            : 0;
-
-          const solanaTotal = solanaResult.status === "fulfilled"
-            ? solanaResult.value.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0)
-            : 0;
-
-          const failures: string[] = [
-            ...(evmResult.status === "rejected" ? ["EVM"] : []),
-            ...(solanaResult.status === "rejected" ? ["Solana"] : []),
-          ];
-
-          return { wallet, positions, totalValueUsd: evmTotal + solanaTotal, failures };
+          return { wallet, positions, totalValueUsd, failures };
         }),
       );
 
@@ -555,6 +547,29 @@ async function fetchEvmPositions(wallet: WalletRecord, signal: AbortSignal): Pro
 
   const payload = (await response.json()) as RawDefiResponse;
   return payload.positions ?? [];
+}
+
+function buildDefiSourceRequests(
+  wallet: WalletRecord,
+  signal: AbortSignal,
+): Array<{ label: string; fetcher: Promise<RawDefiPosition[]> }> {
+  const requests: Array<{ label: string; fetcher: Promise<RawDefiPosition[]> }> = [];
+
+  if (isValidEvmAddress(wallet.normalizedAddress)) {
+    requests.push({
+      label: "EVM",
+      fetcher: fetchEvmPositions(wallet, signal),
+    });
+  }
+
+  if (isValidSolanaAddress(wallet.normalizedAddress)) {
+    requests.push({
+      label: "Solana",
+      fetcher: fetchSolanaWorkerPositions(wallet, signal),
+    });
+  }
+
+  return requests;
 }
 
 async function fetchSolanaWorkerPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
