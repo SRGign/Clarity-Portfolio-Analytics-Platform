@@ -21,11 +21,20 @@ export const PERIODS = ["24h", "7d", "30d"] as const;
 export type Period = (typeof PERIODS)[number];
 
 export function normalizeAddress(value: string): string {
-  return value.trim().toLowerCase();
+  const trimmed = value.trim();
+  return isValidEvmAddress(trimmed) ? trimmed.toLowerCase() : trimmed;
 }
 
 export function isValidEvmAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+}
+
+export function isValidSolanaAddress(value: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.trim());
+}
+
+export function isValidWalletAddress(value: string): boolean {
+  return isValidEvmAddress(value) || isValidSolanaAddress(value);
 }
 
 export function walletSetHash(wallets: WalletRecord[]): string {

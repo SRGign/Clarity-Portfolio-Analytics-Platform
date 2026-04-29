@@ -1451,6 +1451,14 @@ strong {
 .s-input::placeholder { color: var(--muted-2); }
 .s-input:focus { border-color: var(--accent); }
 
+.s-wallet-address-input {
+  min-height: 92px;
+  height: auto;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
 /* ── Buttons ─────────────────────────────────────────────── */
 .s-btn-primary {
   height: 30px;

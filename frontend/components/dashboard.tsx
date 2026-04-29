@@ -9,6 +9,7 @@ import {
   fetchPortfolioHistory,
   groupAllocationsByToken,
   isValidEvmAddress,
+  isValidWalletAddress,
   normalizeAddress,
   PERIODS,
   Period,
@@ -180,13 +181,24 @@ export function Dashboard() {
   const defiProtocolGroups = useMemo(() => groupByProtocol(activeDefiPositions), [activeDefiPositions]);
 
   async function handleRefresh(manual = true) {
-    if (wallets.length === 0) {
+    const evmWallets = wallets.filter((wallet) => isValidEvmAddress(wallet.normalizedAddress));
+
+    if (evmWallets.length === 0) {
+      setSummary(null);
+      setHistory(null);
+      setAssets([]);
+      setPositions([]);
+      setDefiPositions([]);
+      setPositionSummary(null);
+      setDefiSummary(null);
+      setHistoryWarning(null);
+      setError(null);
       return;
     }
     setRefreshing(true);
     setError(null);
     try {
-      const data = await refreshPortfolio(wallets, selectedChains);
+      const data = await refreshPortfolio(evmWallets, selectedChains);
       setSummary(data.summary);
       setAssets(data.assets);
       setPositions(data.positions);
@@ -210,35 +222,59 @@ export function Dashboard() {
 
   async function handleAddWallet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalized = normalizeAddress(inputAddress);
+    const entries = parseWalletInput(inputAddress);
 
-    if (!isValidEvmAddress(normalized)) {
-      setError("Please enter a valid EVM address.");
+    if (entries.length === 0) {
+      setError("Please enter at least one EVM or Solana address.");
       return;
     }
 
-    const existingWallet = wallets.find((wallet) => wallet.normalizedAddress === normalized);
-    if (existingWallet) {
-      setDuplicateAddress(normalized);
-      setActiveWallet(normalized);
+    const invalidEntries = entries.filter((entry) => !isValidWalletAddress(entry));
+    if (invalidEntries.length > 0) {
+      setError(`Invalid wallet address${invalidEntries.length > 1 ? "es" : ""}: ${invalidEntries.slice(0, 3).join(", ")}.`);
+      return;
+    }
+
+    const existingAddresses = new Set(wallets.map((wallet) => wallet.normalizedAddress));
+    const batchAddresses = new Set<string>();
+    const nextWallets: WalletRecord[] = [];
+    let duplicateCount = 0;
+
+    for (const entry of entries) {
+      const normalized = normalizeAddress(entry);
+      if (existingAddresses.has(normalized) || batchAddresses.has(normalized)) {
+        duplicateCount++;
+        continue;
+      }
+
+      batchAddresses.add(normalized);
+      nextWallets.push({
+        normalizedAddress: normalized,
+        originalInput: entry,
+        label: inputLabel.trim(),
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    if (nextWallets.length === 0) {
+      const firstDuplicate = entries.map(normalizeAddress).find((address) => existingAddresses.has(address)) ?? null;
+      setDuplicateAddress(firstDuplicate);
+      setActiveWallet(firstDuplicate);
       setError("Wallet already added. Opened the existing entry.");
       return;
     }
 
-    const nextWallet: WalletRecord = {
-      normalizedAddress: normalized,
-      originalInput: inputAddress.trim(),
-      label: inputLabel.trim(),
-      createdAt: new Date().toISOString(),
-    };
-
-    await saveWallet(nextWallet);
-    setWallets((current) => [...current, nextWallet]);
+    await Promise.all(nextWallets.map((wallet) => saveWallet(wallet)));
+    setWallets((current) => [...current, ...nextWallets]);
     setInputAddress("");
     setInputLabel("");
     setDuplicateAddress(null);
-    setActiveWallet(normalized);
-    setError(null);
+    setActiveWallet(nextWallets[nextWallets.length - 1].normalizedAddress);
+    setError(
+      duplicateCount > 0
+        ? `${nextWallets.length} wallet${nextWallets.length > 1 ? "s" : ""} added. ${duplicateCount} duplicate${duplicateCount > 1 ? "s" : ""} skipped.`
+        : null,
+    );
   }
 
   async function handleRemoveWallet(address: string) {
@@ -266,13 +302,15 @@ export function Dashboard() {
   }
 
   useEffect(() => {
-    if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
+    const evmWallets = wallets.filter((wallet) => isValidEvmAddress(wallet.normalizedAddress));
+
+    if (loading || evmWallets.length === 0 || selectedChains.length === 0 || summary === null) {
       return;
     }
 
     const loadHistory = async () => {
       try {
-        const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
+        const response = await fetchPortfolioHistory(evmWallets, selectedChains, "30d");
         setHistory(response);
         setHistoryWarning(
           response.partial
@@ -366,12 +404,13 @@ export function Dashboard() {
           <div className="s-sidebar-section-hd">WALLET_INTAKE</div>
           <form className="s-form" onSubmit={handleAddWallet}>
             <label className="s-field">
-              <span className="s-field-label">ADDRESS</span>
-              <input
-                className="s-input"
+              <span className="s-field-label">ADDRESSES</span>
+              <textarea
+                className="s-input s-wallet-address-input"
                 value={inputAddress}
                 onChange={(e) => setInputAddress(e.target.value)}
-                placeholder="0x..."
+                placeholder="0x... / Solana address, one per line"
+                rows={4}
               />
             </label>
             <label className="s-field">
@@ -383,7 +422,7 @@ export function Dashboard() {
                 placeholder="Main / trading / treasury"
               />
             </label>
-            <button className="s-btn-outline" type="submit">REGISTER_WALLET</button>
+            <button className="s-btn-outline" type="submit">REGISTER_WALLETS</button>
           </form>
           {error ? <p className="s-error">{error}</p> : null}
         </div>
@@ -1213,6 +1252,13 @@ function buildWalletAllocationRows(
       valueUsd: allocation.valueUsd,
     }))
     .sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function parseWalletInput(value: string): string[] {
+  return value
+    .split(/[\s,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function allocationModeMeta(mode: AllocationMode): {
