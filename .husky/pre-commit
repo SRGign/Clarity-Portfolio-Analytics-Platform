@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+
+npm run build || exit 1
+
+npx lint-staged || exit 1
+
+git diff --cached | grep -iE "(api[_-]?key|secret|password|private[_-]?key|seed[_-]?phrase)" && {
+  echo "Possible secret found in diff. Aborting commit."
+  exit 1
+}
+
+echo "Pre-commit checks passed."

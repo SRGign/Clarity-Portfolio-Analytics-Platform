@@ -1,0 +1,14 @@
+{
+  "devDependencies": {
+    "eslint": "^10.2.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.3"
+  },
+  "scripts": {
+    "build": "npm run build:frontend && npm run build:worker",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:worker": "npm --prefix solana-defi-worker run build",
+    "prepare": "husky"
+  }
+}
