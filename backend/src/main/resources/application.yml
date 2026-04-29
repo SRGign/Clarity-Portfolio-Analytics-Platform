@@ -28,6 +28,12 @@ portfolio:
     solana-balances-enabled: ${PORTFOLIO_GOLDRUSH_SOLANA_BALANCES_ENABLED:true}
     solana-chain-name: ${PORTFOLIO_GOLDRUSH_SOLANA_CHAIN_NAME:solana-mainnet}
 
+solana:
+  defi:
+    worker:
+      base-url: ${SOLANA_DEFI_WORKER_URL:http://localhost:8787}
+      timeout-seconds: ${SOLANA_DEFI_WORKER_TIMEOUT_SECONDS:30}
+
 zerion:
   api:
     base-url: https://api.zerion.io/v1
