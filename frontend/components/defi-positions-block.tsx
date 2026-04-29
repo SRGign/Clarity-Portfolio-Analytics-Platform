@@ -284,6 +284,15 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
           </div>
         </div>
 
+        {state.sourceFailures.length > 0 ? (
+          <div className="s-defi-source-warning">
+            <span>Some chains failed to load: {state.sourceFailures.join(", ")}.</span>
+            <button type="button" className="s-btn-outline" onClick={() => void loadPositions()}>
+              Retry
+            </button>
+          </div>
+        ) : null}
+
         {wallets.length === 0 ? (
           <StatePanel
             title="Track a wallet to load DeFi positions."
