@@ -631,6 +631,7 @@ function displayChain(chain: string): string {
   if (normalized === "polygon") return "Polygon";
   if (normalized === "optimism") return "Optimism";
   if (normalized === "base") return "Base";
+  if (normalized === "solana") return "Solana";
 
   return toTitleCase(normalized.replace(/-/g, " "));
 }
@@ -643,6 +644,7 @@ function chainToneClass(chain: string): string {
   if (normalized === "polygon") return "is-polygon";
   if (normalized === "optimism") return "is-optimism";
   if (normalized === "base") return "is-base";
+  if (normalized === "solana") return "is-solana";
   if (normalized === "binance-smart-chain") return "is-bsc";
 
   return "is-default";
@@ -671,6 +673,8 @@ function resolveGroupChain(
   if (orderedChains.includes("ethereum")) return "ethereum";
   if (orderedChains.includes("arbitrum")) return "arbitrum";
   if (orderedChains.includes("base")) return "base";
+  if (orderedChains.includes("solana")) return "solana";
+  if (orderedChains.includes("binance-smart-chain")) return "binance-smart-chain";
   if (orderedChains.includes("optimism")) return "optimism";
   if (orderedChains.includes("polygon")) return "polygon";
 

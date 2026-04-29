@@ -2696,6 +2696,12 @@ strong {
   background: rgba(30, 64, 175, 0.08);
 }
 
+.s-defi-chain-badge.is-solana {
+  color: #7c2dcb;
+  border-color: rgba(153, 69, 255, 0.36);
+  background: rgba(153, 69, 255, 0.08);
+}
+
 .s-defi-chain-badge.is-bsc {
   color: #b45309;
   border-color: rgba(180, 83, 9, 0.32);
