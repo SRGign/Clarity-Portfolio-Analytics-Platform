@@ -16,7 +16,7 @@ export const connection = new Connection(endpoint, {
   confirmTransactionInitialTimeout: 60_000,
   fetchMiddleware: async (_url, _options, fetch) => {
     await rpcLimiter();
-    await fetch(_url, _options);
+    return fetch(_url, _options);
   }
 });
 

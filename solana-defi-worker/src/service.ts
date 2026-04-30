@@ -4,6 +4,8 @@ import { adapters } from "./adapters/registry.js";
 import { formatError } from "./adapters/utils.js";
 import type { DeFiAdapter, PositionsRequest, PositionsResponse, ProtocolDescriptor } from "./types.js";
 
+const adapterTimeoutMs = readPositiveInteger(process.env.SOLANA_ADAPTER_TIMEOUT_MS, 20_000);
+
 export function listProtocols(): ProtocolDescriptor[] {
   return adapters.map(({ protocolId, protocolName, category }) => ({ protocolId, protocolName, category }));
 }
@@ -28,7 +30,11 @@ export async function fetchPositions(request: PositionsRequest): Promise<Positio
         return {
           adapter,
           status: "fulfilled" as const,
-          positions: await adapter.fetchPositions(request.walletAddress)
+          positions: await withTimeout(
+            adapter.fetchPositions(request.walletAddress),
+            adapterTimeoutMs,
+            `${adapter.protocolId} adapter timed out after ${adapterTimeoutMs}ms`
+          )
         };
       } catch (error) {
         return {
@@ -70,6 +76,27 @@ function resolveAdapters(protocols?: string[]): DeFiAdapter[] {
 
   const requested = new Set(protocols);
   return adapters.filter((adapter) => requested.has(adapter.protocolId));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function readPositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function validateWalletAddress(walletAddress: string): void {
