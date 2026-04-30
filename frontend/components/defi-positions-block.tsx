@@ -47,6 +47,28 @@ type RawDefiPosition = {
   absoluteChange1d?: number | null;
   change24hPercent?: number | null;
   percentChange1d?: number | null;
+  alreadyCountedInSpotTotals?: boolean | null;
+};
+
+type TokenizedSolanaResponse = {
+  walletAddress: string;
+  observedAt: string;
+  totalValueUsd: number;
+  positions: TokenizedSolanaPosition[];
+};
+
+type TokenizedSolanaPosition = {
+  mintAddress: string;
+  symbol: string;
+  protocolKey: string;
+  protocolName: string;
+  positionType: string;
+  quantity: number;
+  priceUsd: number | null;
+  valueUsd: number | null;
+  source: string;
+  confidence: string;
+  alreadyCountedInSpotTotals: boolean;
 };
 
 type WorkerPositionToken = {
@@ -96,6 +118,7 @@ type DefiPosition = {
   valueUsd: number | null;
   change24hUsd: number | null;
   change24hPercent: number | null;
+  alreadyCountedInSpotTotals: boolean;
 };
 
 type DefiGroup = {
@@ -231,7 +254,9 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
     : groupedPositions.slice(0, collapsedCount);
 
   useEffect(() => {
-    const solanaPositions = state.positions.filter((position) => normalizeChain(position.chain) === "solana");
+    const solanaPositions = state.positions.filter(
+      (position) => normalizeChain(position.chain) === "solana" && !position.alreadyCountedInSpotTotals,
+    );
     const walletValues = solanaPositions.reduce<Record<string, number>>((values, position) => {
       values[position.walletAddress] = (values[position.walletAddress] ?? 0) + (position.valueUsd ?? 0);
       return values;
@@ -631,13 +656,36 @@ async function fetchSolanaWorkerPositions(wallet: WalletRecord, signal: AbortSig
   const workerUnavailable = payload.errors?.some((error) => error.protocolId === "worker") ?? false;
 
   if (workerUnavailable) {
-    throw new Error("Solana worker failed to load positions.");
+    return fetchTokenizedSolanaPositions(wallet, signal);
   }
 
-  return (payload.positions ?? []).flatMap((position) => [
+  const workerPositions = (payload.positions ?? []).flatMap((position) => [
     ...(position.tokens ?? []).map((token) => mapWorkerPositionToRaw(position, token)),
     ...(position.pendingRewards ?? []).map((token) => mapWorkerPositionToRaw(position, token, "reward")),
   ]);
+
+  if (workerPositions.length > 0) {
+    return workerPositions;
+  }
+
+  return fetchTokenizedSolanaPositions(wallet, signal);
+}
+
+async function fetchTokenizedSolanaPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/solana/tokenized-defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load tokenized Solana DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as TokenizedSolanaResponse;
+  return (payload.positions ?? []).map(mapTokenizedSolanaPositionToRaw);
 }
 
 function mapWorkerPositionToRaw(
@@ -666,6 +714,33 @@ function mapWorkerPositionToRaw(
     absoluteChange1d: null,
     change24hPercent: null,
     percentChange1d: null,
+    alreadyCountedInSpotTotals: false,
+  };
+}
+
+function mapTokenizedSolanaPositionToRaw(position: TokenizedSolanaPosition): RawDefiPosition {
+  return {
+    positionType: position.positionType,
+    protocol: position.protocolKey,
+    protocolName: position.protocolName,
+    chain: "solana",
+    chainId: "solana",
+    tokenSymbol: position.symbol,
+    tokenName: position.symbol,
+    tokenIconUrl: null,
+    tokenAmount: position.quantity,
+    quantity: position.quantity,
+    valueUsd: position.valueUsd,
+    value: position.valueUsd,
+    groupId: `${position.protocolKey}:${position.mintAddress}`,
+    poolAddress: position.mintAddress,
+    protocolUrl: null,
+    protocolModule: position.source,
+    change24hUsd: null,
+    absoluteChange1d: null,
+    change24hPercent: null,
+    percentChange1d: null,
+    alreadyCountedInSpotTotals: position.alreadyCountedInSpotTotals,
   };
 }
 
@@ -750,6 +825,7 @@ function normalizeDefiPosition(
   const valueUsd = position.valueUsd ?? position.value ?? null;
   const change24hUsd = position.change24hUsd ?? position.absoluteChange1d ?? null;
   const change24hPercent = position.change24hPercent ?? position.percentChange1d ?? null;
+  const alreadyCountedInSpotTotals = position.alreadyCountedInSpotTotals ?? false;
   const walletLabel = wallet.label?.trim() || shortAddress(wallet.originalInput);
   const keyParts = [
     wallet.normalizedAddress,
@@ -778,6 +854,7 @@ function normalizeDefiPosition(
     valueUsd,
     change24hUsd,
     change24hPercent,
+    alreadyCountedInSpotTotals,
   };
 }
 
