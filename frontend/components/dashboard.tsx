@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { DefiPositionsBlock } from "@/components/defi-positions-block";
+import type { SolanaDefiTotals } from "@/components/defi-positions-block";
 import {
   computePeriodDelta,
   fetchChains,
@@ -41,6 +42,11 @@ const SELECTED_CHAINS_KEY = "selected-chains";
 const SWATCHES = ["#2f78d1", "#6d7fe7", "#5975db", "#f07a2c", "#bfdc3c", "#7ec8d8", "#12a7a1", "#a6a0dd"];
 const OTHER_SWATCH = "#5d6674";
 const MAX_ALLOCATION_SLICES = 6;
+const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
+  totalValueUsd: 0,
+  walletValues: {},
+  loading: false,
+};
 
 type AllocationMode = "token" | "chain" | "wallet";
 type AllocationView = "strip" | "ring";
@@ -94,6 +100,7 @@ export function Dashboard() {
   const [defiPositions, setDefiPositions] = useState<DefiPositionResponse[]>([]);
   const [positionSummary, setPositionSummary] = useState<LendingPositionSummaryResponse | null>(null);
   const [defiSummary, setDefiSummary] = useState<DefiPositionSummaryResponse | null>(null);
+  const [solanaDefiTotals, setSolanaDefiTotals] = useState<SolanaDefiTotals>(EMPTY_SOLANA_DEFI_TOTALS);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -129,22 +136,28 @@ export function Dashboard() {
   }, [loading, wallets.length, selectedChains.join("|")]);
 
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
-  const totalUsd = summary?.totalUsd ?? 0;
+  const baseTotalUsd = summary?.totalUsd ?? 0;
+  const totalUsd = baseTotalUsd + solanaDefiTotals.totalValueUsd;
+  const syncValueLoading = wallets.length > 0 && totalUsd === 0 && (refreshing || solanaDefiTotals.loading);
   const chartDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, period),
-    [history?.points, summary?.totalUsd, period],
+    () => computePeriodDelta(history?.points ?? [], totalUsd, period),
+    [history?.points, totalUsd, period],
   );
   const heroDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, "24h"),
-    [history?.points, summary?.totalUsd],
+    () => computePeriodDelta(history?.points ?? [], totalUsd, "24h"),
+    [history?.points, totalUsd],
   );
   const chartPoints = useMemo(
-    () => buildChartPoints(history?.points ?? [], summary?.totalUsd ?? null, period),
-    [history?.points, summary?.totalUsd, period],
+    () => buildChartPoints(history?.points ?? [], wallets.length > 0 ? totalUsd : null, period),
+    [history?.points, totalUsd, period, wallets.length],
   );
   const walletAllocationRows = useMemo(
-    () => buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets),
-    [summary?.walletAllocations, wallets],
+    () => buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets, solanaDefiTotals.walletValues),
+    [summary?.walletAllocations, wallets, solanaDefiTotals.walletValues],
+  );
+  const chainAllocationRows = useMemo(
+    () => buildChainAllocationRows(summary?.allocations ?? [], solanaDefiTotals.totalValueUsd),
+    [summary?.allocations, solanaDefiTotals.totalValueUsd],
   );
   const allocationRows = useMemo(
     () =>
@@ -152,8 +165,8 @@ export function Dashboard() {
         ? groupAllocationsByToken(assets)
         : allocationMode === "wallet"
           ? walletAllocationRows
-          : summary?.allocations ?? [],
-    [allocationMode, assets, summary?.allocations, walletAllocationRows],
+          : chainAllocationRows,
+    [allocationMode, assets, chainAllocationRows, walletAllocationRows],
   );
   const allocationChartRows = useMemo(
     () => buildAllocationChartRows(allocationRows, totalUsd),
@@ -167,8 +180,8 @@ export function Dashboard() {
   const overviewLegendRows = useMemo(() => allocationChartRows, [allocationChartRows]);
   const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
   const activity = useMemo(
-    () => buildActivity(wallets, history?.points ?? [], lastRefresh, summary?.totalUsd ?? null),
-    [wallets, history?.points, lastRefresh, summary?.totalUsd],
+    () => buildActivity(wallets, history?.points ?? [], lastRefresh, wallets.length > 0 ? totalUsd : null),
+    [wallets, history?.points, lastRefresh, totalUsd],
   );
   const activeDefiPositions = useMemo(
     () => (defiPositions.length > 0 ? defiPositions : positions),
@@ -191,6 +204,7 @@ export function Dashboard() {
       setDefiPositions([]);
       setPositionSummary(null);
       setDefiSummary(null);
+      setSolanaDefiTotals(EMPTY_SOLANA_DEFI_TOTALS);
       setHistoryWarning(null);
       setError(null);
       return;
@@ -288,6 +302,7 @@ export function Dashboard() {
     setDefiPositions([]);
     setPositionSummary(null);
     setDefiSummary(null);
+    setSolanaDefiTotals(EMPTY_SOLANA_DEFI_TOTALS);
   }
 
   async function toggleChain(chainId: string) {
@@ -518,7 +533,9 @@ export function Dashboard() {
             <section className="s-hero">
               <p className="s-kicker">TOTAL_NET_WORTH</p>
               <div className="s-hero-row">
-                <h1 className="s-hero-value">{formatCurrency(totalUsd)}</h1>
+                <h1 className="s-hero-value">
+                  {syncValueLoading ? <SyncValueLoader label="SYNCING_VALUE" /> : formatCurrency(totalUsd)}
+                </h1>
                 {heroDelta.amount !== null && (
                   <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
                     <span className="s-delta-pct">{formatPercent(heroDelta.percentage)}</span>
@@ -545,6 +562,14 @@ export function Dashboard() {
                   <div key={wallet.normalizedAddress} className="s-wallet-chip">
                     <div className="s-wallet-chip-dot" style={{ background: SWATCHES[i % SWATCHES.length] }} />
                     <span className="mono">{wallet.label || shortAddress(wallet.originalInput)}</span>
+                    <button
+                      className="s-wallet-chip-remove"
+                      type="button"
+                      aria-label={`Remove ${wallet.label || shortAddress(wallet.originalInput)}`}
+                      onClick={() => void handleRemoveWallet(wallet.normalizedAddress)}
+                    >
+                      x
+                    </button>
                   </div>
                 ))}
                 <button className="s-wallet-chip-add" type="button">+</button>
@@ -609,7 +634,9 @@ export function Dashboard() {
                     {overviewAllocationView === "ring" ? (
                       <div className="s-ring-layout">
                         <div>
-                          <div className="s-mega">{formatCurrency(totalUsd)}</div>
+                          <div className="s-mega">
+                            {syncValueLoading ? <SyncValueLoader label="SYNCING_VALUE" compact /> : formatCurrency(totalUsd)}
+                          </div>
                           <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
                             {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
                           </div>
@@ -661,7 +688,7 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <DefiPositionsBlock wallets={wallets} />
+                <DefiPositionsBlock wallets={wallets} onSolanaTotalsChange={setSolanaDefiTotals} />
 
                 {/* Asset Inventory */}
                 <div className="s-panel">
@@ -1153,6 +1180,17 @@ function AllocationDetailList({
   );
 }
 
+function SyncValueLoader({ label, compact = false }: { label: string; compact?: boolean }) {
+  return (
+    <span className={`s-sync-value ${compact ? "is-compact" : ""}`} role="status" aria-live="polite">
+      <span className="s-sync-value-track">
+        <span className="s-sync-value-fill" />
+      </span>
+      <span className="s-sync-value-label mono">{label}</span>
+    </span>
+  );
+}
+
 function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUsd: number | null, period: Period): ChartPoint[] {
   let points = historyPoints
     .slice()
@@ -1234,22 +1272,55 @@ function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): Al
   ];
 }
 
+function buildChainAllocationRows(
+  allocations: ChainAllocation[],
+  solanaDefiTotalUsd: number,
+): ChainAllocation[] {
+  const rows = new Map<string, ChainAllocation>();
+
+  for (const allocation of allocations) {
+    rows.set(allocation.network, allocation);
+  }
+
+  if (solanaDefiTotalUsd > 0) {
+    const existing = rows.get("solana");
+    rows.set("solana", {
+      network: "solana",
+      displayName: existing?.displayName ?? "Solana",
+      valueUsd: (existing?.valueUsd ?? 0) + solanaDefiTotalUsd,
+    });
+  }
+
+  return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
 function buildWalletAllocationRows(
   walletAllocations: PortfolioSummaryResponse["walletAllocations"],
   wallets: WalletRecord[],
+  solanaDefiWalletValues: Record<string, number>,
 ): ChainAllocation[] {
   const labelByAddress = new Map(
     wallets.map((wallet) => [
-      wallet.normalizedAddress,
+      wallet.normalizedAddress.toLowerCase(),
       wallet.label?.trim() ? `${wallet.label.trim()} / ${shortAddress(wallet.originalInput)}` : shortAddress(wallet.originalInput),
     ]),
   );
+  const valueByWallet = new Map<string, number>();
 
-  return walletAllocations
-    .map((allocation) => ({
-      network: allocation.walletAddress,
-      displayName: labelByAddress.get(allocation.walletAddress.toLowerCase()) ?? shortAddress(allocation.walletAddress),
-      valueUsd: allocation.valueUsd,
+  for (const allocation of walletAllocations) {
+    valueByWallet.set(allocation.walletAddress.toLowerCase(), allocation.valueUsd);
+  }
+
+  for (const [walletAddress, valueUsd] of Object.entries(solanaDefiWalletValues)) {
+    const key = walletAddress.toLowerCase();
+    valueByWallet.set(key, (valueByWallet.get(key) ?? 0) + valueUsd);
+  }
+
+  return [...valueByWallet.entries()]
+    .map(([walletAddress, valueUsd]) => ({
+      network: walletAddress,
+      displayName: labelByAddress.get(walletAddress) ?? shortAddress(walletAddress),
+      valueUsd,
     }))
     .sort((left, right) => right.valueUsd - left.valueUsd);
 }

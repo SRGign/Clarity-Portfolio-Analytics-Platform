@@ -10,6 +10,13 @@ const API_BASE_URL =
 
 type DefiPositionsBlockProps = {
   wallets: WalletRecord[];
+  onSolanaTotalsChange?: (totals: SolanaDefiTotals) => void;
+};
+
+export type SolanaDefiTotals = {
+  totalValueUsd: number;
+  walletValues: Record<string, number>;
+  loading: boolean;
 };
 
 type RawDefiResponse = {
@@ -112,7 +119,7 @@ type DefiState = {
   sourceFailures: string[];
 };
 
-export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
+export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositionsBlockProps) {
   const [state, setState] = useState<DefiState>({
     totalValueUsd: 0,
     positions: [],
@@ -224,6 +231,21 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
     : groupedPositions.slice(0, collapsedCount);
 
   useEffect(() => {
+    const solanaPositions = state.positions.filter((position) => normalizeChain(position.chain) === "solana");
+    const walletValues = solanaPositions.reduce<Record<string, number>>((values, position) => {
+      values[position.walletAddress] = (values[position.walletAddress] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
+    const totalValueUsd = solanaPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+
+    onSolanaTotalsChange?.({
+      totalValueUsd,
+      walletValues,
+      loading,
+    });
+  }, [loading, onSolanaTotalsChange, state.positions]);
+
+  useEffect(() => {
     setExpanded(false);
   }, [wallets.length, state.positions.length]);
 
@@ -265,7 +287,11 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         <div className="s-defi-summary-bar">
           <div className="s-defi-summary-main">
             <span className="s-defi-summary-label">Total DeFi Value</span>
-            <strong className="s-defi-summary-value mono">{formatCurrency(state.totalValueUsd)}</strong>
+            {loading && state.totalValueUsd === 0 ? (
+              <SyncRail label="SCANNING_PROTOCOL_POSITIONS" />
+            ) : (
+              <strong className="s-defi-summary-value mono">{formatCurrency(state.totalValueUsd)}</strong>
+            )}
             <p className="s-defi-summary-copy">
               Grouped by protocol pool and reward leg across the tracked wallet set.
             </p>
@@ -306,7 +332,9 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         ) : (
           <>
             <div className="s-defi-group-grid" ref={groupsRef}>
-              {visibleGroups.map((group) => (
+              {visibleGroups.map((group) => {
+                const isSolanaGroup = normalizeChain(group.chain) === "solana";
+                return (
               <article key={group.key} className="s-defi-group-card">
                 <header className="s-defi-group-header">
                   <div className="s-defi-group-identity">
@@ -322,21 +350,23 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
                       </div>
                     </div>
                   </div>
-                  <div className="s-defi-group-metrics">
+                  <div className={`s-defi-group-metrics ${isSolanaGroup ? "is-single" : ""}`}>
                     <div className="s-defi-metric-stack">
                       <span>Group Value</span>
                       <strong className="mono">{formatCurrency(group.totalValueUsd)}</strong>
                     </div>
-                    <div className="s-defi-metric-stack">
-                      <span>24H Delta</span>
-                      {group.change24hUsd !== null ? (
-                        <strong className={`mono ${changeToneClass(group.change24hUsd)}`}>
-                          {formatSignedCurrency(group.change24hUsd)}
-                        </strong>
-                      ) : (
-                        <strong className="s-muted">Not reported</strong>
-                      )}
-                    </div>
+                    {!isSolanaGroup ? (
+                      <div className="s-defi-metric-stack">
+                        <span>24H Delta</span>
+                        {group.change24hUsd !== null ? (
+                          <strong className={`mono ${changeToneClass(group.change24hUsd)}`}>
+                            {formatSignedCurrency(group.change24hUsd)}
+                          </strong>
+                        ) : (
+                          <strong className="s-muted">Not reported</strong>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 </header>
 
@@ -368,7 +398,8 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
                   </div>
                 ) : null}
               </article>
-              ))}
+                );
+              })}
             </div>
             {hasOverflow ? (
               <div className="s-defi-actions">
@@ -385,6 +416,17 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         )}
       </div>
     </section>
+  );
+}
+
+function SyncRail({ label }: { label: string }) {
+  return (
+    <div className="s-sync-rail" role="status" aria-live="polite">
+      <span className="s-sync-rail-track">
+        <span className="s-sync-rail-fill" />
+      </span>
+      <strong className="mono">{label}</strong>
+    </div>
   );
 }
 
