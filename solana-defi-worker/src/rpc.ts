@@ -1,11 +1,7 @@
 import { Connection } from "@solana/web3.js";
 import { createSolanaRpc } from "@solana/kit";
 
-const endpoint =
-  process.env.SOLANA_RPC_URL ||
-  process.env.RPC_FAST_URL ||
-  process.env.HELIUS_RPC_URL ||
-  "https://api.mainnet-beta.solana.com";
+const endpoint = resolveRpcEndpoint();
 const rpcRequestsPerSecond = readPositiveInteger(process.env.SOLANA_RPC_RPS, 50);
 
 const rpcLimiter = createRateLimiter(rpcRequestsPerSecond);
@@ -21,6 +17,7 @@ export const connection = new Connection(endpoint, {
 });
 
 export const kitRpc = createSolanaRpc(endpoint);
+export const rpcEndpointHost = new URL(endpoint).host;
 
 export async function withRpcRetry<T>(operation: () => Promise<T>, maxAttempts = 3): Promise<T> {
   let lastError: unknown;
@@ -47,6 +44,19 @@ export async function withRpcRetry<T>(operation: () => Promise<T>, maxAttempts =
 function readPositiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveRpcEndpoint(): string {
+  const endpoint =
+    process.env.SOLANA_RPC_URL ||
+    process.env.RPC_FAST_URL ||
+    process.env.HELIUS_RPC_URL;
+
+  if (!endpoint) {
+    throw new Error("SOLANA_RPC_URL, RPC_FAST_URL, or HELIUS_RPC_URL must be configured for solana-defi-worker");
+  }
+
+  return endpoint;
 }
 
 function createRateLimiter(requestsPerSecond: number): () => Promise<void> {

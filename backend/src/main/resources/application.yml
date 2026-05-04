@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: pnl-tracker-backend
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../.env[.properties]
   datasource:
     url: ${PORTFOLIO_DB_URL:jdbc:sqlite:./pnl-tracker.db}
     driver-class-name: org.sqlite.JDBC
@@ -31,8 +35,8 @@ portfolio:
 solana:
   defi:
     worker:
-      base-url: ${SOLANA_DEFI_WORKER_URL:http://localhost:8787}
-      timeout-seconds: ${SOLANA_DEFI_WORKER_TIMEOUT_SECONDS:30}
+      base-url: ${SOLANA_DEFI_WORKER_URLS:${SOLANA_DEFI_WORKER_URL:http://localhost:8787}}
+      timeout-seconds: ${SOLANA_DEFI_WORKER_TIMEOUT_SECONDS:90}
 
 zerion:
   api:

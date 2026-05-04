@@ -7,6 +7,7 @@ import type { WalletRecord } from "@/types/portfolio";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8080/api";
+const MIN_POSITION_VALUE_USD = 1;
 
 type DefiPositionsBlockProps = {
   wallets: WalletRecord[];
@@ -186,15 +187,11 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
           const positions = sourceResults.flatMap((result) =>
             result.status === "fulfilled" ? result.value : [],
           );
-          const totalValueUsd = positions.reduce(
-            (sum, position) => sum + (position.valueUsd ?? position.value ?? 0),
-            0,
-          );
           const failures = sourceResults.flatMap((result, index) =>
             result.status === "rejected" ? [sourceRequests[index].label] : [],
           );
 
-          return { wallet, positions, totalValueUsd, failures };
+          return { wallet, positions, failures };
         }),
       );
 
@@ -205,11 +202,13 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
       const fulfilledResults = results.flatMap((result) =>
         result.status === "fulfilled" ? [result.value] : [],
       );
-      const positions = fulfilledResults.flatMap(({ wallet, positions: walletPositions }) =>
-        walletPositions.map((position, index) => normalizeDefiPosition(position, wallet, index)),
+      const positions = filterReportablePositionGroups(
+        fulfilledResults.flatMap(({ wallet, positions: walletPositions }) =>
+          walletPositions.map((position, index) => normalizeDefiPosition(position, wallet, index)),
+        ),
       );
-      const totalValueUsd = fulfilledResults.reduce(
-        (sum, result) => sum + result.totalValueUsd,
+      const totalValueUsd = positions.reduce(
+        (sum, position) => sum + (position.valueUsd ?? 0),
         0,
       );
       const sourceFailures = uniqueSourceFailures(
@@ -808,6 +807,25 @@ function buildDefiGroups(positions: DefiPosition[]): DefiGroup[] {
       };
     })
     .sort((left, right) => right.totalValueUsd - left.totalValueUsd);
+}
+
+function filterReportablePositionGroups(positions: DefiPosition[]): DefiPosition[] {
+  const groupTotals = positions.reduce<Map<string, number>>((totals, position) => {
+    const key = defiPositionGroupKey(position);
+    totals.set(key, (totals.get(key) ?? 0) + (position.valueUsd ?? 0));
+    return totals;
+  }, new Map());
+
+  return positions.filter((position) =>
+    Math.abs(groupTotals.get(defiPositionGroupKey(position)) ?? 0) >= MIN_POSITION_VALUE_USD,
+  );
+}
+
+function defiPositionGroupKey(position: DefiPosition): string {
+  const poolGroupingKey = position.poolAddress
+    ? `${position.protocol}::${position.poolAddress}`
+    : position.groupId ?? position.protocol;
+  return [position.walletAddress, poolGroupingKey].join("::").toLowerCase();
 }
 
 function normalizeDefiPosition(

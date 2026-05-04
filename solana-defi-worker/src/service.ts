@@ -4,7 +4,7 @@ import { adapters } from "./adapters/registry.js";
 import { formatError } from "./adapters/utils.js";
 import type { DeFiAdapter, PositionsRequest, PositionsResponse, ProtocolDescriptor } from "./types.js";
 
-const adapterTimeoutMs = readPositiveInteger(process.env.SOLANA_ADAPTER_TIMEOUT_MS, 20_000);
+const adapterTimeoutMs = readPositiveInteger(process.env.SOLANA_ADAPTER_TIMEOUT_MS, 60_000);
 
 export function listProtocols(): ProtocolDescriptor[] {
   return adapters.map(({ protocolId, protocolName, category }) => ({ protocolId, protocolName, category }));

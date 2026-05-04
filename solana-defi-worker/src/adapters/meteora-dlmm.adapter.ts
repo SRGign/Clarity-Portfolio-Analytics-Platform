@@ -89,6 +89,8 @@ export class MeteoraDlmmAdapter implements DeFiAdapter {
       const tokenY = pairRecord.tokenY as Record<string, unknown> | undefined;
       const mintX = tokenX?.mint as Record<string, unknown> | undefined;
       const mintY = tokenY?.mint as Record<string, unknown> | undefined;
+      const metadataTokenX = poolMetadata?.token_x as Record<string, unknown> | undefined;
+      const metadataTokenY = poolMetadata?.token_y as Record<string, unknown> | undefined;
       const userPositions = (pairRecord.lbPairPositionsData ?? []) as unknown[];
 
       for (const userPosition of userPositions) {
@@ -100,19 +102,30 @@ export class MeteoraDlmmAdapter implements DeFiAdapter {
           continue;
         }
 
-        const decimalsX = readNumber(mintX, ["decimals"], 0);
-        const decimalsY = readNumber(mintY, ["decimals"], 0);
+        const decimalsX = readNumber(mintX, ["decimals"], readNumber(metadataTokenX, ["decimals"], 0));
+        const decimalsY = readNumber(mintY, ["decimals"], readNumber(metadataTokenY, ["decimals"], 0));
+        const poolSymbols = parsePoolSymbols(poolMetadata?.name);
         const positionTokenX = await pricedToken({
           mint: tokenXMint,
-          symbol: readString(mintX, ["symbol", "name"], "X"),
+          symbol: readString(
+            mintX,
+            ["symbol", "name"],
+            readString(metadataTokenX, ["symbol", "name"], poolSymbols[0] ?? "X")
+          ),
           decimals: decimalsX,
-          amount: toHumanAmount(readString(positionData, ["totalXAmount"], "0"), decimalsX)
+          amount: toHumanAmount(readString(positionData, ["totalXAmount"], "0"), decimalsX),
+          priceUsd: readOptionalNumber(metadataTokenX, ["price"])
         });
         const positionTokenY = await pricedToken({
           mint: tokenYMint,
-          symbol: readString(mintY, ["symbol", "name"], "Y"),
+          symbol: readString(
+            mintY,
+            ["symbol", "name"],
+            readString(metadataTokenY, ["symbol", "name"], poolSymbols[1] ?? "Y")
+          ),
           decimals: decimalsY,
-          amount: toHumanAmount(readString(positionData, ["totalYAmount"], "0"), decimalsY)
+          amount: toHumanAmount(readString(positionData, ["totalYAmount"], "0"), decimalsY),
+          priceUsd: readOptionalNumber(metadataTokenY, ["price"])
         });
 
         positions.push(
@@ -226,6 +239,16 @@ function sumStringAmounts(records: MeteoraWalletEarning[] | undefined, key: keyo
   return String(total);
 }
 
+function parsePoolSymbols(poolName: string | undefined): [string | undefined, string | undefined] {
+  const parts = poolName?.split("-").map((part) => part.trim()).filter(Boolean) ?? [];
+  return [parts[0], parts[1]];
+}
+
+function readOptionalNumber(record: unknown, keys: string[]): number | undefined {
+  const value = readNumber(record, keys, Number.NaN);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 type CacheEntry<T> = {
   value: T;
   expiresAt: number;
@@ -237,6 +260,18 @@ type MeteoraPoolMetadata = {
   current_price?: number | string;
   liquidity?: number;
   fees_24h?: number;
+  token_x?: {
+    symbol?: string;
+    name?: string;
+    decimals?: number;
+    price?: number;
+  };
+  token_y?: {
+    symbol?: string;
+    name?: string;
+    decimals?: number;
+    price?: number;
+  };
 };
 
 type MeteoraWalletEarning = {
