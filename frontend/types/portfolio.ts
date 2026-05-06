@@ -106,6 +106,20 @@ export type PortfolioHistoryResponse = {
   asOf: string;
 };
 
+export type PortfolioMetricsResponse = {
+  concentrationPct: number;
+  concentrationAsset: string;
+  concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  stableAllocationPct: number;
+  defiAllocationPct: number;
+  idleStableUsd: number;
+  monthlyOpportunityCostUsd: number;
+  sharpe30d: number | null;
+  sortino30d: number | null;
+  maxDrawdownPct30d: number | null;
+  historyDaysAvailable: number;
+};
+
 export type ChainOption = {
   id: string;
   providerNetwork: string;

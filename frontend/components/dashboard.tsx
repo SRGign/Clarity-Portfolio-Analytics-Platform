@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { DefiPositionsBlock } from "@/components/defi-positions-block";
 import type { SolanaDefiTotals } from "@/components/defi-positions-block";
+import { PortfolioMetricsBlock } from "@/components/portfolio-metrics-block";
 import {
   canonicalAsset,
   computePeriodDelta,
@@ -726,6 +727,8 @@ export function Dashboard() {
                     )}
                   </div>
                 </div>
+
+                <PortfolioMetricsBlock wallets={wallets} chains={selectedChains} />
 
                 <DefiPositionsBlock wallets={wallets} onSolanaTotalsChange={setSolanaDefiTotals} />
 

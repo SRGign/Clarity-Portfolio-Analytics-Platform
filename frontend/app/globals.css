@@ -2221,6 +2221,92 @@ strong {
   gap: 12px;
 }
 
+.s-metrics-panel {
+  overflow: visible;
+}
+
+.s-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-top: 0;
+  background: #111111;
+  gap: 2px;
+}
+
+.s-metric-card {
+  min-width: 0;
+  min-height: 104px;
+  padding: 12px 11px;
+  background: var(--panel);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-content: start;
+}
+
+.s-metric-card.is-muted .s-metric-value {
+  color: var(--muted-2);
+  font-size: clamp(0.72rem, 0.95vw, 0.84rem);
+  letter-spacing: 0.08em;
+  white-space: normal;
+}
+
+.s-metric-label {
+  color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+.s-metric-value {
+  color: var(--text);
+  font-size: clamp(1.05rem, 1.35vw, 1.46rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.02;
+  overflow-wrap: anywhere;
+}
+
+.s-metric-badge {
+  width: fit-content;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.s-metric-badge.is-green {
+  color: var(--positive);
+  border-color: rgba(22, 163, 74, 0.36);
+  background: rgba(22, 163, 74, 0.08);
+}
+
+.s-metric-badge.is-amber {
+  color: var(--warning);
+  border-color: rgba(217, 119, 6, 0.36);
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.s-metric-badge.is-red {
+  color: var(--negative);
+  border-color: rgba(220, 38, 38, 0.36);
+  background: rgba(220, 38, 38, 0.06);
+}
+
+.s-metric-badge.is-muted {
+  color: var(--muted-2);
+  border-color: var(--line-strong);
+  background: var(--panel-2);
+}
+
 /* ── Allocation strip & legend ───────────────────────────── */
 .s-alloc-strip {
   display: flex;
@@ -3249,6 +3335,10 @@ strong {
   .s-defi-group-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .s-metrics-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1180px) {
@@ -3290,6 +3380,7 @@ strong {
   .s-sidebar { display: none; }
   .s-main { margin-left: 0; padding: 14px 14px; }
   .s-empty-steps { grid-template-columns: 1fr; }
+  .s-metrics-grid { grid-template-columns: 1fr; }
 }
 
 /* ══════════════════════════════════════════════════════════ */

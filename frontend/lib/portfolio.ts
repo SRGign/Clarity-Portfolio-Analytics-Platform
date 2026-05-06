@@ -8,6 +8,7 @@ import {
   LendingPositionSummaryResponse,
   PortfolioHistoryPoint,
   PortfolioHistoryResponse,
+  PortfolioMetricsResponse,
   PortfolioOverviewResponse,
   PortfolioSummaryResponse,
   RefreshResult,
@@ -112,6 +113,27 @@ export async function fetchPortfolioHistory(
   }
 
   return (await response.json()) as PortfolioHistoryResponse;
+}
+
+export async function fetchPortfolioMetrics(
+  wallets: WalletRecord[],
+  chains: string[],
+): Promise<PortfolioMetricsResponse> {
+  const response = await fetch(`${API_BASE_URL}/v1/portfolio/metrics`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      addresses: wallets.map((wallet) => wallet.normalizedAddress),
+      chains,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await safeError(response);
+    throw new Error(body ?? "Failed to load portfolio metrics");
+  }
+
+  return (await response.json()) as PortfolioMetricsResponse;
 }
 
 async function safeError(response: Response): Promise<string | null> {
