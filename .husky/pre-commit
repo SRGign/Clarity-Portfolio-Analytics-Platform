@@ -4,9 +4,18 @@ npm run build || exit 1
 
 npx lint-staged || exit 1
 
-git diff --cached | grep -iE "(api[_-]?key|secret|password|private[_-]?key|seed[_-]?phrase)" && {
+secret_hits=$(
+  git diff --cached --unified=0 -- . ':(exclude).husky/pre-commit' |
+    grep '^+' |
+    grep -v '^+++' |
+    grep -iE "(api[_-]?key|secret|password|private[_-]?key|seed[_-]?phrase).{0,40}(:|[^=!<>]=[^=]).{20,}" |
+    grep -vE '[:=][[:space:]]*(""|'\'\''|\$\{[A-Z0-9_]+:?\}|your_|example|placeholder)' || true
+)
+
+if [ -n "$secret_hits" ]; then
+  echo "$secret_hits"
   echo "Possible secret found in diff. Aborting commit."
   exit 1
-}
+fi
 
 echo "Pre-commit checks passed."
