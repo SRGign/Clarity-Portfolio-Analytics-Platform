@@ -171,7 +171,7 @@ public class PortfolioService {
 
                 BigDecimal valueUsd = providerAsset.quantity()
                         .multiply(providerAsset.priceUsd());
-                valueByWallet.merge(providerAsset.walletAddress().toLowerCase(Locale.ROOT), valueUsd, BigDecimal::add);
+                valueByWallet.merge(normalizeWalletKey(providerAsset.walletAddress()), valueUsd, BigDecimal::add);
             }
         }
 
@@ -231,7 +231,7 @@ public class PortfolioService {
         return addresses.stream()
                 .map(String::trim)
                 .filter(value -> !value.isEmpty())
-                .map(String::toLowerCase)
+                .map(this::normalizeWalletKey)
                 .distinct()
                 .toList();
     }
@@ -259,8 +259,7 @@ public class PortfolioService {
         private BigDecimal priceUsd = BigDecimal.ZERO;
 
         private MutableAsset(ProviderAsset providerAsset) {
-            this.assetId = providerAsset.network() + ":" +
-                    (providerAsset.tokenAddress() == null ? "native" : providerAsset.tokenAddress().toLowerCase());
+            this.assetId = AssetIds.fromProviderAsset(providerAsset);
             this.network = providerAsset.network();
             this.tokenAddress = providerAsset.tokenAddress();
             this.symbol = providerAsset.symbol();
@@ -293,5 +292,14 @@ public class PortfolioService {
                     nativeToken,
                     logoUrl);
         }
+    }
+
+    private String normalizeWalletKey(String address) {
+        String trimmed = address == null ? "" : address.trim();
+        return isEvmAddress(trimmed) ? trimmed.toLowerCase(Locale.ROOT) : trimmed;
+    }
+
+    private boolean isEvmAddress(String value) {
+        return value.matches("(?i)^0x[0-9a-f]{40}$");
     }
 }

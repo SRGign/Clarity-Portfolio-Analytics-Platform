@@ -82,6 +82,28 @@ class PortfolioServiceTest {
     }
 
     @Test
+    void countsSolanaSpotAssetsWithoutLowercasingAddressesOrMints() {
+        PortfolioService service = new PortfolioService(
+                new SolanaProvider(),
+                new ChainCatalogService(),
+                new SimpleTtlCache(new PortfolioProperties()),
+                new WrapperHeuristicLendingDetector(new PortfolioProperties()));
+
+        var analysis = service.getAnalysis(
+                List.of("H3cK6QhV1vN9A2bY8sLmP4rT7xZ5uWqE3dF9gJ2kL6mN"),
+                List.of("solana"));
+
+        assertThat(analysis.summary().totalUsd()).isEqualByComparingTo("187.50");
+        assertThat(analysis.summary().allocations()).hasSize(1);
+        assertThat(analysis.summary().allocations().get(0).network()).isEqualTo("solana-mainnet");
+        assertThat(analysis.summary().allocations().get(0).displayName()).isEqualTo("Solana");
+        assertThat(analysis.summary().walletAllocations().get(0).walletAddress())
+                .isEqualTo("H3cK6QhV1vN9A2bY8sLmP4rT7xZ5uWqE3dF9gJ2kL6mN");
+        assertThat(analysis.assets().get(0).assetId())
+                .isEqualTo("solana-mainnet:JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN");
+    }
+
+    @Test
     void detectsWrapperTokenAsLendingPositionWithoutChangingSpotTotals() {
         var analysis = portfolioService.getAnalysis(
                 List.of("0xabc", "0xdef"),
@@ -292,6 +314,32 @@ class PortfolioServiceTest {
         @Override
         public String providerName() {
             return "aave-supply-debt";
+        }
+    }
+
+    private static final class SolanaProvider implements AssetPortfolioProvider {
+
+        @Override
+        public ProviderFetchResult fetchAssetsWithDebug(List<String> addresses, List<String> networks) {
+            return new ProviderFetchResult(
+                    List.of(new ProviderAsset(
+                            "H3cK6QhV1vN9A2bY8sLmP4rT7xZ5uWqE3dF9gJ2kL6mN",
+                            "solana-mainnet",
+                            "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+                            "JUP",
+                            "Jupiter",
+                            6,
+                            new BigDecimal("150.0"),
+                            new BigDecimal("1.25"),
+                            false,
+                            null)),
+                    List.of(),
+                    List.of());
+        }
+
+        @Override
+        public String providerName() {
+            return "solana";
         }
     }
 }

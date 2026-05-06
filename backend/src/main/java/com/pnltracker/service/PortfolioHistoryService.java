@@ -15,6 +15,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
@@ -165,7 +166,7 @@ public class PortfolioHistoryService {
         List<String> normalizedAddresses = addresses.stream()
                 .map(String::trim)
                 .filter(value -> !value.isEmpty())
-                .map(String::toLowerCase)
+                .map(this::normalizeWalletKey)
                 .distinct()
                 .sorted()
                 .toList();
@@ -183,6 +184,11 @@ public class PortfolioHistoryService {
                 resolvedChains,
                 effectiveChains,
                 scopeHash(normalizedAddresses, effectiveChains));
+    }
+
+    private String normalizeWalletKey(String address) {
+        String trimmed = address == null ? "" : address.trim();
+        return trimmed.matches("(?i)^0x[0-9a-f]{40}$") ? trimmed.toLowerCase(Locale.ROOT) : trimmed;
     }
 
     private String scopeHash(List<String> addresses, List<String> chains) {

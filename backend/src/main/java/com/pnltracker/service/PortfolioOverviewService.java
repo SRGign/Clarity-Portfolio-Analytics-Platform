@@ -10,6 +10,7 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -46,7 +47,7 @@ public class PortfolioOverviewService {
         List<String> normalizedAddresses = addresses.stream()
                 .map(String::trim)
                 .filter(value -> !value.isEmpty())
-                .map(String::toLowerCase)
+                .map(PortfolioOverviewService::normalizeWalletKey)
                 .distinct()
                 .toList();
         if (normalizedAddresses.isEmpty()) {
@@ -61,7 +62,7 @@ public class PortfolioOverviewService {
         CompletableFuture<PortfolioAnalysis> evmFuture =
                 CompletableFuture.supplyAsync(() -> portfolioService.getAnalysis(addresses, chains));
         CompletableFuture<PortfolioAnalysis> hyperliquidFuture =
-                CompletableFuture.supplyAsync(() -> hyperliquidPortfolioService.getAnalysis(addresses));
+                CompletableFuture.supplyAsync(() -> hyperliquidPortfolioService.getAnalysis(evmAddresses(addresses)));
 
         PortfolioAnalysis evm = evmFuture.join();
         PortfolioAnalysis hyperliquid = hyperliquidFuture.join();
@@ -148,5 +149,20 @@ public class PortfolioOverviewService {
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 not available", exception);
         }
+    }
+
+    private static List<String> evmAddresses(List<String> addresses) {
+        return addresses.stream()
+                .filter(PortfolioOverviewService::isEvmAddress)
+                .toList();
+    }
+
+    private static String normalizeWalletKey(String address) {
+        String trimmed = address == null ? "" : address.trim();
+        return isEvmAddress(trimmed) ? trimmed.toLowerCase(Locale.ROOT) : trimmed;
+    }
+
+    private static boolean isEvmAddress(String value) {
+        return value.matches("(?i)^0x[0-9a-f]{40}$");
     }
 }
