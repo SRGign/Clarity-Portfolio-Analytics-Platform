@@ -42,3 +42,10 @@ zerion:
   api:
     base-url: https://api.zerion.io/v1
     api-key: ${ZERION_API_KEY:}
+
+gemini:
+  api:
+    base-url: https://generativelanguage.googleapis.com
+    api-key: ${GEMINI_API_KEY:}
+    model: gemini-2.5-pro
+    max-tokens: 2000
