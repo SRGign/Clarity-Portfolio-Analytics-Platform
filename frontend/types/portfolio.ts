@@ -130,6 +130,53 @@ export type BenchmarkData = {
   solana: BenchmarkPoint[];
 };
 
+export type AiAdvisorRisk = {
+  severity: "HIGH" | "MEDIUM" | "LOW";
+  title: string;
+  detail: string;
+  impactUsd: number | null;
+};
+
+export type AiAdvisorOpportunity = {
+  title: string;
+  detail: string;
+  gainUsd: number | null;
+  effort: "LOW" | "MEDIUM" | "HIGH";
+};
+
+export type AiAdvisorAction = {
+  priority: "URGENT" | "THIS_WEEK" | "CONSIDER";
+  action: string;
+  rationale: string;
+};
+
+export type AiAdvisorSummary = {
+  healthScore: number;
+  healthLabel: "STRONG" | "GOOD" | "MODERATE" | "WEAK" | "CRITICAL";
+  oneLiner: string;
+  metrics: {
+    concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    liquidityScore: number;
+    yieldEfficiency: number;
+    diversificationScore: number;
+    idleStableUsd: number;
+  };
+  risks: AiAdvisorRisk[];
+  opportunities: AiAdvisorOpportunity[];
+  actions: AiAdvisorAction[];
+  caveat: string;
+};
+
+export type AiAdvisorError = {
+  error: string;
+  message?: string;
+};
+
+export type AiChatMessage = {
+  role: "user" | "model";
+  text: string;
+};
+
 export type ChainOption = {
   id: string;
   providerNetwork: string;

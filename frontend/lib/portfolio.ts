@@ -1,5 +1,8 @@
 import {
   AssetRow,
+  AiAdvisorError,
+  AiAdvisorSummary,
+  AiChatMessage,
   BenchmarkData,
   ChainAllocation,
   ChainOption,
@@ -148,6 +151,48 @@ export async function fetchPortfolioBenchmarks(startTimestamp: number): Promise<
   }
 
   return (await response.json()) as BenchmarkData;
+}
+
+export async function requestAiPortfolioSummary(
+  wallets: WalletRecord[],
+  chains: string[],
+): Promise<AiAdvisorSummary | AiAdvisorError> {
+  const response = await fetch(`${API_BASE_URL}/v1/ai/portfolio-summary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      addresses: wallets.map((wallet) => wallet.normalizedAddress),
+      chains,
+    }),
+  });
+
+  const body = (await response.json()) as AiAdvisorSummary | AiAdvisorError;
+  if (!response.ok && !("error" in body)) {
+    return { error: "AI_ERROR", message: "AI request failed" };
+  }
+  return body;
+}
+
+export async function requestAiPortfolioChat(
+  wallets: WalletRecord[],
+  chains: string[],
+  messages: AiChatMessage[],
+): Promise<{ reply: string } | AiAdvisorError> {
+  const response = await fetch(`${API_BASE_URL}/v1/ai/portfolio-chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      addresses: wallets.map((wallet) => wallet.normalizedAddress),
+      chains,
+      messages,
+    }),
+  });
+
+  const body = (await response.json()) as { reply: string } | AiAdvisorError;
+  if (!response.ok && !("error" in body)) {
+    return { error: "AI_ERROR", message: "AI request failed" };
+  }
+  return body;
 }
 
 async function safeError(response: Response): Promise<string | null> {
