@@ -66,7 +66,7 @@ public class GoldRushPortfolioHistoryProvider implements PortfolioHistoryProvide
             return new PortfolioHistoryFetchResult(SOURCE, totalsByDate, missingChains);
         }
 
-        for (ChainDefinition chain : request.chains()) {
+        for (ChainDefinition chain : supportedChains(request)) {
             String chainName = toGoldRushChainName(chain.providerNetwork());
             if (chainName == null || chainName.isBlank()) {
                 missingChains.add(chain.id());
@@ -164,5 +164,15 @@ public class GoldRushPortfolioHistoryProvider implements PortfolioHistoryProvide
 
     private String toGoldRushChainName(String providerNetwork) {
         return NETWORK_ALIASES.getOrDefault(providerNetwork, providerNetwork);
+    }
+
+    private List<ChainDefinition> supportedChains(PortfolioHistoryFetchRequest request) {
+        return request.chains().stream()
+                .filter(this::isSupportedChain)
+                .toList();
+    }
+
+    private boolean isSupportedChain(ChainDefinition chain) {
+        return "EVM".equalsIgnoreCase(chain.family());
     }
 }
