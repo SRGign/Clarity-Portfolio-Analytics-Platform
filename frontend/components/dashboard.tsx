@@ -9,6 +9,7 @@ import {
   canonicalAsset,
   computePeriodDelta,
   fetchChains,
+  fetchPortfolioBenchmarks,
   fetchPortfolioHistory,
   groupAllocationsByToken,
   isValidEvmAddress,
@@ -37,6 +38,7 @@ import type {
   LendingPositionSummaryResponse,
   PortfolioHistoryPoint,
   PortfolioHistoryResponse,
+  BenchmarkData,
   PortfolioSummaryResponse,
   WalletRecord,
 } from "@/types/portfolio";
@@ -105,6 +107,7 @@ export function Dashboard() {
   const [selectedChains, setSelectedChains] = useState<string[]>([]);
   const [summary, setSummary] = useState<PortfolioSummaryResponse | null>(null);
   const [history, setHistory] = useState<PortfolioHistoryResponse | null>(null);
+  const [benchmarks, setBenchmarks] = useState<BenchmarkData | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -242,6 +245,7 @@ export function Dashboard() {
     if (wallets.length === 0) {
       setSummary(null);
       setHistory(null);
+      setBenchmarks(null);
       setAssets([]);
       setPositions([]);
       setDefiPositions([]);
@@ -327,6 +331,7 @@ export function Dashboard() {
       await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
     }
     setHistory(null);
+    setBenchmarks(null);
     setWallets((current) => [...current, ...nextWallets]);
     setInputAddress("");
     setInputLabel("");
@@ -374,8 +379,19 @@ export function Dashboard() {
       try {
         const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
         setHistory(response);
+        const startTimestamp = historyStartTimestamp(response.points);
+        if (startTimestamp === null) {
+          setBenchmarks(null);
+          return;
+        }
+        try {
+          setBenchmarks(await fetchPortfolioBenchmarks(startTimestamp));
+        } catch {
+          setBenchmarks(null);
+        }
       } catch {
         setHistory(null);
+        setBenchmarks(null);
       }
     };
 
@@ -644,7 +660,7 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-body">
-                    <Chart points={chartPoints} />
+                    <Chart points={chartPoints} benchmarks={benchmarks} />
                   </div>
                 </div>
 
@@ -954,10 +970,16 @@ function NetworkBreakdownTag({ asset }: { asset: AssetInventoryRow }) {
   );
 }
 
-function Chart({ points }: { points: ChartPoint[] }) {
+function Chart({ points, benchmarks }: { points: ChartPoint[]; benchmarks: BenchmarkData | null }) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const [visibleSeries, setVisibleSeries] = useState({
+    portfolio: true,
+    bitcoin: true,
+    solana: true,
+  });
   const [hoveredPoint, setHoveredPoint] = useState<{
     point: ChartPoint;
+    indexValue: number;
     x: number;
     y: number;
     width: number;
@@ -974,7 +996,15 @@ function Chart({ points }: { points: ChartPoint[] }) {
   const padRight = 18;
   const padTop = 14;
   const padBottom = 34;
-  const values = points.map((point) => point.value);
+  const portfolioSeries = buildPortfolioIndexSeries(points);
+  const bitcoinSeries = benchmarks ? buildBenchmarkSeries(benchmarks.bitcoin, points) : [];
+  const solanaSeries = benchmarks ? buildBenchmarkSeries(benchmarks.solana, points) : [];
+  const visibleIndexValues = [
+    ...(visibleSeries.portfolio ? portfolioSeries.map((point) => point.indexValue) : []),
+    ...(visibleSeries.bitcoin ? bitcoinSeries.map((point) => point.indexValue) : []),
+    ...(visibleSeries.solana ? solanaSeries.map((point) => point.indexValue) : []),
+  ];
+  const values = visibleIndexValues.length > 0 ? visibleIndexValues : portfolioSeries.map((point) => point.indexValue);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const padding = min === max
@@ -993,11 +1023,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
       value,
     };
   });
-  const coords = points.map((point, index) => {
-    const x = points.length === 1 ? (padLeft + width - padRight) / 2 : padLeft + (index * (width - padLeft - padRight)) / Math.max(1, points.length - 1);
-    const y = height - padBottom - ((point.value - floor) / range) * (height - padTop - padBottom);
-    return { ...point, x, y };
-  });
+  const coords = portfolioSeries.map((point, index) => toChartCoord(point, index, portfolioSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
+  const bitcoinCoords = bitcoinSeries.map((point, index) => toChartCoord(point, index, bitcoinSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
+  const solanaCoords = solanaSeries.map((point, index) => toChartCoord(point, index, solanaSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
   const interactiveCoords = coords.map((point, index) => {
     const previousX = index === 0 ? padLeft : (coords[index - 1].x + point.x) / 2;
     const nextX = index === coords.length - 1 ? width - padRight : (point.x + coords[index + 1].x) / 2;
@@ -1007,7 +1035,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
       hitWidth: Math.max(nextX - previousX, 18),
     };
   });
-  const linePath = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  const linePath = buildSvgPath(coords);
+  const bitcoinPath = buildSvgPath(bitcoinCoords);
+  const solanaPath = buildSvgPath(solanaCoords);
   const areaPath = `${linePath} L ${coords[coords.length - 1].x.toFixed(2)} ${(height - padBottom).toFixed(2)} L ${coords[0].x.toFixed(2)} ${(height - padBottom).toFixed(2)} Z`;
   const step = Math.max(1, Math.ceil(points.length / 5));
 
@@ -1018,8 +1048,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
     }
     setHoveredPoint({
       point,
+      indexValue: point.indexValue,
       x: (point.x / width) * rect.width,
-      y: (point.y / height) * rect.height,
+        y: (point.y / height) * rect.height,
       width: rect.width,
       height: rect.height,
     });
@@ -1045,13 +1076,15 @@ function Chart({ points }: { points: ChartPoint[] }) {
             <g key={tick.key}>
               <line x1={padLeft} y1={tick.y} x2={width - padRight} y2={tick.y} className="chart-grid-line" />
               <text x={padLeft - 10} y={tick.y + 4} textAnchor="end" className="chart-axis-label">
-                {formatAxisCurrency(tick.value)}
+                {formatIndexAxis(tick.value)}
               </text>
             </g>
           );
         })}
-        <path d={areaPath} className="chart-area" />
-        <path d={linePath} className={`chart-line ${coords[coords.length - 1].value >= coords[0].value ? "is-up" : "is-down"}`} />
+        {visibleSeries.portfolio ? <path d={areaPath} className="chart-area" /> : null}
+        {visibleSeries.bitcoin && bitcoinPath ? <path d={bitcoinPath} className="chart-line is-benchmark" style={{ stroke: "#F7931A" }} /> : null}
+        {visibleSeries.solana && solanaPath ? <path d={solanaPath} className="chart-line is-benchmark" style={{ stroke: "#9945FF" }} /> : null}
+        {visibleSeries.portfolio ? <path d={linePath} className={`chart-line ${coords[coords.length - 1].indexValue >= coords[0].indexValue ? "is-up" : "is-down"}`} /> : null}
         {interactiveCoords.map((point) => (
           <rect
             key={`${point.localDate}-zone`}
@@ -1094,11 +1127,109 @@ function Chart({ points }: { points: ChartPoint[] }) {
         >
           <span>{hoveredPoint.point.tooltipContext}</span>
           <strong>{formatCurrency(hoveredPoint.point.value)}</strong>
-          <p>{hoveredPoint.point.timestampLabel}</p>
+          <p>{hoveredPoint.point.timestampLabel} / IDX {hoveredPoint.indexValue.toFixed(1)}</p>
         </div>
       ) : null}
+      <div className="chart-legend" aria-label="Chart series toggles">
+        <ChartLegendButton
+          label="Portfolio"
+          color="var(--accent)"
+          active={visibleSeries.portfolio}
+          onClick={() => setVisibleSeries((current) => ({ ...current, portfolio: !current.portfolio }))}
+        />
+        <ChartLegendButton
+          label="BTC"
+          color="#F7931A"
+          active={visibleSeries.bitcoin}
+          disabled={bitcoinSeries.length === 0}
+          onClick={() => setVisibleSeries((current) => ({ ...current, bitcoin: !current.bitcoin }))}
+        />
+        <ChartLegendButton
+          label="SOL"
+          color="#9945FF"
+          active={visibleSeries.solana}
+          disabled={solanaSeries.length === 0}
+          onClick={() => setVisibleSeries((current) => ({ ...current, solana: !current.solana }))}
+        />
+      </div>
     </div>
   );
+}
+
+function ChartLegendButton({
+  label,
+  color,
+  active,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  color: string;
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`chart-legend-btn ${active ? "is-active" : ""}`}
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={active}
+    >
+      <span className="chart-legend-dot" style={{ backgroundColor: color }} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function buildPortfolioIndexSeries(points: ChartPoint[]) {
+  const firstValue = points[0]?.value;
+  const base = firstValue && firstValue > 0 ? firstValue : 1;
+  return points.map((point) => ({
+    ...point,
+    indexValue: point.value > 0 ? (point.value / base) * 100 : 100,
+  }));
+}
+
+function buildBenchmarkSeries(points: BenchmarkData["bitcoin"], chartPoints: ChartPoint[]) {
+  if (points.length === 0 || chartPoints.length === 0) {
+    return [];
+  }
+  const firstDate = chartPoints[0].localDate;
+  const lastDate = chartPoints[chartPoints.length - 1].localDate;
+  return points
+    .map((point) => {
+      const localDate = new Date(point.timestamp * 1000).toISOString().slice(0, 10);
+      return {
+        localDate,
+        label: formatShortDate(localDate),
+        indexValue: point.index,
+      };
+    })
+    .filter((point) => point.localDate >= firstDate && point.localDate <= lastDate);
+}
+
+function toChartCoord<T extends { indexValue: number }>(
+  point: T,
+  index: number,
+  count: number,
+  padLeft: number,
+  padRight: number,
+  padTop: number,
+  padBottom: number,
+  width: number,
+  height: number,
+  floor: number,
+  range: number,
+) {
+  const x = count === 1 ? (padLeft + width - padRight) / 2 : padLeft + (index * (width - padLeft - padRight)) / Math.max(1, count - 1);
+  const y = height - padBottom - ((point.indexValue - floor) / range) * (height - padTop - padBottom);
+  return { ...point, x, y };
+}
+
+function buildSvgPath(points: Array<{ x: number; y: number }>): string {
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
 }
 
 function AllocationDonutChart({
@@ -1778,6 +1909,21 @@ function formatHistoryPointTimestamp(localDate: string, isCurrent: boolean): str
   return isCurrent
     ? `${date.toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })} live`
     : `${date.toLocaleString("en-US", { month: "short", day: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
+}
+
+function historyStartTimestamp(points: PortfolioHistoryPoint[]): number | null {
+  const firstPoint = points
+    .slice()
+    .sort((left, right) => left.localDate.localeCompare(right.localDate))[0];
+  if (!firstPoint) {
+    return null;
+  }
+  const timestamp = new Date(`${firstPoint.localDate}T00:00:00Z`).getTime();
+  return Number.isNaN(timestamp) ? null : Math.floor(timestamp / 1000);
+}
+
+function formatIndexAxis(value: number): string {
+  return `${value.toFixed(0)}`;
 }
 
 function formatAxisCurrency(value: number): string {

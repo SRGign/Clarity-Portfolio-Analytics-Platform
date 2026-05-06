@@ -120,6 +120,16 @@ export type PortfolioMetricsResponse = {
   historyDaysAvailable: number;
 };
 
+export type BenchmarkPoint = {
+  timestamp: number;
+  index: number;
+};
+
+export type BenchmarkData = {
+  bitcoin: BenchmarkPoint[];
+  solana: BenchmarkPoint[];
+};
+
 export type ChainOption = {
   id: string;
   providerNetwork: string;

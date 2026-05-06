@@ -1,5 +1,6 @@
 import {
   AssetRow,
+  BenchmarkData,
   ChainAllocation,
   ChainOption,
   DefiPositionResponse,
@@ -134,6 +135,19 @@ export async function fetchPortfolioMetrics(
   }
 
   return (await response.json()) as PortfolioMetricsResponse;
+}
+
+export async function fetchPortfolioBenchmarks(startTimestamp: number): Promise<BenchmarkData> {
+  const response = await fetch(`${API_BASE_URL}/v1/portfolio/benchmarks?start=${startTimestamp}`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const body = await safeError(response);
+    throw new Error(body ?? "Failed to load portfolio benchmarks");
+  }
+
+  return (await response.json()) as BenchmarkData;
 }
 
 async function safeError(response: Response): Promise<string | null> {
