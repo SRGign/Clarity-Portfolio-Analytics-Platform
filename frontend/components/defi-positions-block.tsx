@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -17,6 +17,7 @@ type DefiPositionsBlockProps = {
 export type SolanaDefiTotals = {
   totalValueUsd: number;
   walletValues: Record<string, number>;
+  chainValues: Record<string, number>;
   loading: boolean;
 };
 
@@ -40,6 +41,7 @@ type RawDefiPosition = {
   tokenSymbol?: string | null;
   tokenName?: string | null;
   tokenIconUrl?: string | null;
+  tokenMint?: string | null;
   tokenAmount?: number | null;
   quantity?: number | null;
   valueUsd?: number | null;
@@ -115,6 +117,7 @@ type DefiPosition = {
   tokenSymbol: string;
   tokenName: string;
   tokenIconUrl: string | null;
+  tokenMint: string | null;
   tokenAmount: number | null;
   valueUsd: number | null;
   change24hUsd: number | null;
@@ -261,10 +264,18 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
       return values;
     }, {});
     const totalValueUsd = solanaPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const chainValues = state.positions
+      .filter((position) => !position.alreadyCountedInSpotTotals)
+      .reduce<Record<string, number>>((values, position) => {
+        const chain = normalizeChain(position.chain);
+        values[chain] = (values[chain] ?? 0) + (position.valueUsd ?? 0);
+        return values;
+      }, {});
 
     onSolanaTotalsChange?.({
       totalValueUsd,
       walletValues,
+      chainValues,
       loading,
     });
   }, [loading, onSolanaTotalsChange, state.positions]);
@@ -312,7 +323,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
           <div className="s-defi-summary-main">
             <span className="s-defi-summary-label">Total DeFi Value</span>
             {loading && state.totalValueUsd === 0 ? (
-              <SyncRail label="SCANNING_PROTOCOL_POSITIONS" />
+              <SyncRail label="SCANNING PROTOCOL POSITIONS" />
             ) : (
               <strong className="s-defi-summary-value mono">{formatCurrency(state.totalValueUsd)}</strong>
             )}
@@ -432,7 +443,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
                   type="button"
                   onClick={() => setExpanded((current) => !current)}
                 >
-                  {expanded ? "SHOW_LESS" : `SHOW_MORE_${groupedPositions.length - visibleGroups.length}`}
+                  {expanded ? "SHOW LESS" : `SHOW MORE ${groupedPositions.length - visibleGroups.length}`}
                 </button>
               </div>
             ) : null}
@@ -477,7 +488,12 @@ function PositionRow({
         ) : null}
         <div className="s-defi-position-asset">
           <div className="s-defi-token-identity">
-            <TokenIcon tokenName={position.tokenName} tokenSymbol={position.tokenSymbol} tokenIconUrl={position.tokenIconUrl} />
+            <TokenIcon
+              tokenName={position.tokenName}
+              tokenSymbol={position.tokenSymbol}
+              tokenIconUrl={position.tokenIconUrl}
+              tokenMint={position.tokenMint}
+            />
             <div className="s-defi-token-copy">
               <strong>{position.tokenName}</strong>
               <span>{position.tokenSymbol}</span>
@@ -507,10 +523,11 @@ function ProtocolIcon({
   protocolUrl: string | null;
 }) {
   const [failed, setFailed] = useState(false);
+  const resolvedProtocolUrl = protocolUrl ?? knownProtocolUrl(protocolName);
 
   const faviconUrl =
-    protocolUrl && !failed
-      ? `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(protocolUrl)}`
+    resolvedProtocolUrl && !failed
+      ? `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(resolvedProtocolUrl)}`
       : null;
 
   return (
@@ -535,14 +552,17 @@ function TokenIcon({
   tokenName,
   tokenSymbol,
   tokenIconUrl,
+  tokenMint,
 }: {
   tokenName: string;
   tokenSymbol: string;
   tokenIconUrl: string | null;
+  tokenMint: string | null;
 }) {
   const [failed, setFailed] = useState(false);
+  const resolvedIconUrl = tokenIconUrl ?? solanaTokenIconUrl(tokenMint) ?? knownTokenIconUrl(tokenSymbol);
 
-  if (!tokenIconUrl || failed) {
+  if (!resolvedIconUrl || failed) {
     return (
       <span className="s-defi-token-icon-fallback" aria-hidden="true">
         {(tokenSymbol || tokenName).slice(0, 1).toUpperCase()}
@@ -552,7 +572,7 @@ function TokenIcon({
 
   return (
     <img
-      src={tokenIconUrl}
+      src={resolvedIconUrl}
       alt=""
       className="s-defi-token-icon"
       loading="lazy"
@@ -700,7 +720,8 @@ function mapWorkerPositionToRaw(
     chainId: "solana",
     tokenSymbol: token.symbol,
     tokenName: token.symbol,
-    tokenIconUrl: null,
+    tokenIconUrl: solanaTokenIconUrl(token.mint),
+    tokenMint: token.mint,
     tokenAmount: token.amount,
     quantity: token.amount,
     valueUsd: token.valueUsd,
@@ -726,7 +747,8 @@ function mapTokenizedSolanaPositionToRaw(position: TokenizedSolanaPosition): Raw
     chainId: "solana",
     tokenSymbol: position.symbol,
     tokenName: position.symbol,
-    tokenIconUrl: null,
+    tokenIconUrl: solanaTokenIconUrl(position.mintAddress),
+    tokenMint: position.mintAddress,
     tokenAmount: position.quantity,
     quantity: position.quantity,
     valueUsd: position.valueUsd,
@@ -868,6 +890,7 @@ function normalizeDefiPosition(
     tokenSymbol,
     tokenName,
     tokenIconUrl: position.tokenIconUrl?.trim() || null,
+    tokenMint: position.tokenMint?.trim() || null,
     tokenAmount,
     valueUsd,
     change24hUsd,
@@ -1001,6 +1024,36 @@ function changeToneClass(value: number): string {
   if (value > 0) return "tone-positive";
   if (value < 0) return "tone-negative";
   return "";
+}
+
+function knownProtocolUrl(protocolName: string): string | null {
+  const normalized = protocolName.trim().toLowerCase();
+  if (normalized.includes("marginfi")) return "https://www.marginfi.com";
+  if (normalized.includes("meteora") || normalized.includes("dlmm")) return "https://www.meteora.ag";
+  if (normalized.includes("kamino") || normalized.includes("camina")) return "https://kamino.finance";
+  if (normalized.includes("raydium")) return "https://raydium.io";
+  if (normalized.includes("jupiter")) return "https://jup.ag";
+  if (normalized.includes("jito")) return "https://www.jito.network";
+  return null;
+}
+
+function solanaTokenIconUrl(mint: string | null | undefined): string | null {
+  const normalized = mint?.trim();
+  if (!normalized) {
+    return null;
+  }
+  return `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${encodeURIComponent(normalized)}/logo.png`;
+}
+
+function knownTokenIconUrl(tokenSymbol: string): string | null {
+  const normalized = tokenSymbol.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (normalized === "USDC") {
+    return "https://assets.coingecko.com/coins/images/6319/small/usdc.png";
+  }
+  if (normalized === "JITOSOL") {
+    return "https://assets.coingecko.com/coins/images/28045/small/JitoSOL-200.png";
+  }
+  return null;
 }
 
 function toTitleCase(value: string): string {

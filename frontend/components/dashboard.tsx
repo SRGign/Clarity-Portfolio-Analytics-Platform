@@ -5,11 +5,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { DefiPositionsBlock } from "@/components/defi-positions-block";
 import type { SolanaDefiTotals } from "@/components/defi-positions-block";
 import {
+  canonicalAsset,
   computePeriodDelta,
   fetchChains,
   fetchPortfolioHistory,
   groupAllocationsByToken,
   isValidEvmAddress,
+  isValidSolanaAddress,
   isValidWalletAddress,
   normalizeAddress,
   PERIODS,
@@ -39,12 +41,14 @@ import type {
 } from "@/types/portfolio";
 
 const SELECTED_CHAINS_KEY = "selected-chains";
+const SELECTED_CHAINS_CATALOG_KEY = "selected-chains-catalog";
 const SWATCHES = ["#2f78d1", "#6d7fe7", "#5975db", "#f07a2c", "#bfdc3c", "#7ec8d8", "#12a7a1", "#a6a0dd"];
 const OTHER_SWATCH = "#5d6674";
 const MAX_ALLOCATION_SLICES = 6;
 const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
   totalValueUsd: 0,
   walletValues: {},
+  chainValues: {},
   loading: false,
 };
 
@@ -76,6 +80,24 @@ type AllocationChartRow = ChainAllocation & {
   groupedCount: number;
 };
 
+type AssetInventoryRow = {
+  key: string;
+  symbol: string;
+  name: string;
+  quantity: number;
+  priceUsd: number;
+  valueUsd: number;
+  networks: string[];
+  networkBreakdown: Array<{
+    network: string;
+    label: string;
+    valueUsd: number;
+    share: number;
+  }>;
+  networkLabel: string;
+  typeLabel: string;
+};
+
 export function Dashboard() {
   const [wallets, setWallets] = useState<WalletRecord[]>([]);
   const [chains, setChains] = useState<ChainOption[]>([]);
@@ -86,12 +108,11 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [historyWarning, setHistoryWarning] = useState<string | null>(null);
   const [inputAddress, setInputAddress] = useState("");
   const [inputLabel, setInputLabel] = useState("");
   const [duplicateAddress, setDuplicateAddress] = useState<string | null>(null);
   const [activeWallet, setActiveWallet] = useState<string | null>(null);
-  const [period, setPeriod] = useState<Period>("24h");
+  const [period, setPeriod] = useState<Period>("30d");
   const [allocationMode, setAllocationMode] = useState<AllocationMode>("token");
   const [overviewAllocationView, setOverviewAllocationView] = useState<AllocationView>("strip");
   const [hoveredAllocationKey, setHoveredAllocationKey] = useState<string | null>(null);
@@ -105,20 +126,25 @@ export function Dashboard() {
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [storedWallets, supportedChains, savedSelectedChains, savedLastRefresh] =
+        const [storedWallets, supportedChains, savedSelectedChains, savedChainCatalog, savedLastRefresh] =
           await Promise.all([
             listWallets(),
             fetchChains(),
             getMeta(SELECTED_CHAINS_KEY),
+            getMeta(SELECTED_CHAINS_CATALOG_KEY),
             getMeta("last-refresh"),
           ]);
+        const chainSelection = reconcileSelectedChains(supportedChains, savedSelectedChains, savedChainCatalog);
+        const chainCatalogSignature = catalogSignature(supportedChains);
 
         setWallets(storedWallets);
         setChains(supportedChains);
-        setSelectedChains(
-          savedSelectedChains?.split(",").filter(Boolean) ?? supportedChains.map((chain) => chain.id),
-        );
+        setSelectedChains(chainSelection);
         setLastRefresh(savedLastRefresh);
+        await Promise.all([
+          setMeta(SELECTED_CHAINS_CATALOG_KEY, chainCatalogSignature),
+          chainSelection.join(",") !== (savedSelectedChains ?? "") ? setMeta(SELECTED_CHAINS_KEY, chainSelection.join(",")) : Promise.resolve(),
+        ]);
       } catch (bootstrapError) {
         setError(bootstrapError instanceof Error ? bootstrapError.message : "Failed to load local data");
       } finally {
@@ -156,9 +182,10 @@ export function Dashboard() {
     [summary?.walletAllocations, wallets, solanaDefiTotals.walletValues],
   );
   const chainAllocationRows = useMemo(
-    () => buildChainAllocationRows(summary?.allocations ?? [], solanaDefiTotals.totalValueUsd),
-    [summary?.allocations, solanaDefiTotals.totalValueUsd],
+    () => buildChainAllocationRows(summary?.allocations ?? [], solanaDefiTotals.chainValues),
+    [summary?.allocations, solanaDefiTotals.chainValues],
   );
+  const assetInventoryRows = useMemo(() => buildAssetInventoryRows(assets), [assets]);
   const allocationRows = useMemo(
     () =>
       allocationMode === "token"
@@ -177,7 +204,24 @@ export function Dashboard() {
       allocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? allocationChartRows[0] ?? null,
     [allocationChartRows, hoveredAllocationKey],
   );
-  const overviewLegendRows = useMemo(() => allocationChartRows, [allocationChartRows]);
+  const summaryAllocationRows = useMemo(
+    () =>
+      allocationMode === "token"
+        ? groupAllocationsByToken(assets)
+        : allocationMode === "wallet"
+          ? buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets, {})
+          : (summary?.allocations ?? []),
+    [allocationMode, assets, summary?.walletAllocations, summary?.allocations, wallets],
+  );
+  const summaryAllocationChartRows = useMemo(
+    () => buildAllocationChartRows(summaryAllocationRows, baseTotalUsd),
+    [summaryAllocationRows, baseTotalUsd],
+  );
+  const summaryActiveAllocationRow = useMemo(
+    () =>
+      summaryAllocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? summaryAllocationChartRows[0] ?? null,
+    [summaryAllocationChartRows, hoveredAllocationKey],
+  );
   const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
   const activity = useMemo(
     () => buildActivity(wallets, history?.points ?? [], lastRefresh, wallets.length > 0 ? totalUsd : null),
@@ -194,9 +238,7 @@ export function Dashboard() {
   const defiProtocolGroups = useMemo(() => groupByProtocol(activeDefiPositions), [activeDefiPositions]);
 
   async function handleRefresh(manual = true) {
-    const evmWallets = wallets.filter((wallet) => isValidEvmAddress(wallet.normalizedAddress));
-
-    if (evmWallets.length === 0) {
+    if (wallets.length === 0) {
       setSummary(null);
       setHistory(null);
       setAssets([]);
@@ -205,21 +247,19 @@ export function Dashboard() {
       setPositionSummary(null);
       setDefiSummary(null);
       setSolanaDefiTotals(EMPTY_SOLANA_DEFI_TOTALS);
-      setHistoryWarning(null);
       setError(null);
       return;
     }
     setRefreshing(true);
     setError(null);
     try {
-      const data = await refreshPortfolio(evmWallets, selectedChains);
+      const data = await refreshPortfolio(wallets, selectedChains);
       setSummary(data.summary);
       setAssets(data.assets);
       setPositions(data.positions);
       setDefiPositions(data.defiPositions);
       setPositionSummary(data.positionSummary ?? null);
       setDefiSummary(data.defiSummary ?? null);
-      setHistoryWarning(null);
 
       const refreshTime = new Date().toISOString();
       setLastRefresh(refreshTime);
@@ -279,6 +319,13 @@ export function Dashboard() {
     }
 
     await Promise.all(nextWallets.map((wallet) => saveWallet(wallet)));
+    const addedSolanaWallet = nextWallets.some((wallet) => isValidSolanaAddress(wallet.normalizedAddress));
+    if (addedSolanaWallet && chains.some((chain) => chain.id === "solana") && !selectedChains.includes("solana")) {
+      const nextSelection = [...selectedChains, "solana"];
+      setSelectedChains(nextSelection);
+      await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
+    }
+    setHistory(null);
     setWallets((current) => [...current, ...nextWallets]);
     setInputAddress("");
     setInputLabel("");
@@ -312,29 +359,22 @@ export function Dashboard() {
     if (nextSelection.length === 0) {
       return;
     }
+    setHistory(null);
     setSelectedChains(nextSelection);
     await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
   }
 
   useEffect(() => {
-    const evmWallets = wallets.filter((wallet) => isValidEvmAddress(wallet.normalizedAddress));
-
-    if (loading || evmWallets.length === 0 || selectedChains.length === 0 || summary === null) {
+    if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
       return;
     }
 
     const loadHistory = async () => {
       try {
-        const response = await fetchPortfolioHistory(evmWallets, selectedChains, "30d");
+        const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
         setHistory(response);
-        setHistoryWarning(
-          response.partial
-            ? `History is partial. Missing chains: ${response.missingChains.join(", ")}.`
-            : null,
-        );
-      } catch (historyError) {
+      } catch {
         setHistory(null);
-        setHistoryWarning(historyError instanceof Error ? historyError.message : "Failed to load history");
       }
     };
 
@@ -345,10 +385,10 @@ export function Dashboard() {
     return (
       <div className="s-layout">
         <header className="s-topbar">
-          <span className="s-brand">P&amp;L_TERMINAL_V3</span>
+          <span className="s-brand">P&amp;L TERMINAL V3</span>
         </header>
         <div className="s-loading">
-          <p className="s-kicker">INITIALIZING_TERMINAL</p>
+          <p className="s-kicker">INITIALIZING TERMINAL</p>
           <p className="s-loading-msg">Loading local vault, scope matrix, and portfolio state...</p>
         </div>
         <footer className="s-footer">
@@ -364,7 +404,7 @@ export function Dashboard() {
     chains.length === 0
       ? "Loading scope"
       : selectedChains.length === chains.length
-        ? `All ${chains.length} EVM networks`
+        ? `All ${chains.length} networks`
         : `${selectedChains.length}/${chains.length} networks`;
 
   return (
@@ -373,23 +413,23 @@ export function Dashboard() {
       {/* ── TOP NAVBAR ─────────────────────────────────────────────── */}
       <header className="s-topbar">
         <div className="s-topbar-left">
-          <span className="s-brand">P&amp;L_TERMINAL_V3</span>
+          <span className="s-brand">P&amp;L TERMINAL V3</span>
           <nav className="s-topnav">
-            <span className="s-topnav-active">LIVE_SYNC</span>
-            <span className="s-topnav-link">{scopeLabel.toUpperCase().replace(/ /g, "_")}</span>
+            <span className="s-topnav-active">LIVE SYNC</span>
+            <span className="s-topnav-link">{scopeLabel.toUpperCase()}</span>
           </nav>
         </div>
         <div className="s-topbar-right">
-          <span className="s-topbar-meta mono">{walletHash ? shortHash(walletHash) : "NO_HASH"}</span>
+          <span className="s-topbar-meta mono">{walletHash ? shortHash(walletHash) : "NO HASH"}</span>
           <button
             className="s-btn-primary"
             type="button"
             onClick={() => void handleRefresh(true)}
             disabled={refreshing || wallets.length === 0}
           >
-            {refreshing ? "SYNCING..." : "SYNC_LIVE"}
+            {refreshing ? "SYNCING..." : "SYNC LIVE"}
           </button>
-          <span className="s-btn-outline s-btn-sm">AUTHORIZE_PRIVATE</span>
+          <span className="s-btn-outline s-btn-sm">AUTHORIZE PRIVATE</span>
         </div>
       </header>
 
@@ -400,8 +440,8 @@ export function Dashboard() {
         <div className="s-sidebar-user">
           <div className="s-sidebar-avatar">P</div>
           <div>
-            <p className="s-sidebar-name">OPERATOR_01</p>
-            <p className="s-sidebar-level">LEVEL_3_AUTH</p>
+            <p className="s-sidebar-name">OPERATOR 01</p>
+            <p className="s-sidebar-level">LEVEL 3 AUTH</p>
           </div>
         </div>
 
@@ -409,14 +449,14 @@ export function Dashboard() {
         <nav className="s-sidenav">
           <a className="s-sidenav-item s-sidenav-active">DASHBOARD</a>
           <a className="s-sidenav-item">ANALYTICS</a>
-          <a className="s-sidenav-item">NETWORK_EXPOSURE</a>
-          <a className="s-sidenav-item">ASSET_INVENTORY</a>
-          <a className="s-sidenav-item">RISK_ENGINE</a>
+          <a className="s-sidenav-item">NETWORK EXPOSURE</a>
+          <a className="s-sidenav-item">ASSET INVENTORY</a>
+          <a className="s-sidenav-item">RISK ENGINE</a>
         </nav>
 
         {/* Wallet intake */}
         <div className="s-sidebar-section">
-          <div className="s-sidebar-section-hd">WALLET_INTAKE</div>
+          <div className="s-sidebar-section-hd">WALLET INTAKE</div>
           <form className="s-form" onSubmit={handleAddWallet}>
             <label className="s-field">
               <span className="s-field-label">ADDRESSES</span>
@@ -437,7 +477,7 @@ export function Dashboard() {
                 placeholder="Main / trading / treasury"
               />
             </label>
-            <button className="s-btn-outline" type="submit">REGISTER_WALLETS</button>
+            <button className="s-btn-outline" type="submit">REGISTER WALLETS</button>
           </form>
           {error ? <p className="s-error">{error}</p> : null}
         </div>
@@ -446,7 +486,7 @@ export function Dashboard() {
         {wallets.length > 0 && (
           <div className="s-sidebar-section">
             <div className="s-sidebar-section-hd">
-              <span>TRACKED_WALLETS</span>
+              <span>TRACKED WALLETS</span>
               <span className="s-badge">{wallets.length}</span>
             </div>
             <div className="s-wallet-list">
@@ -476,7 +516,7 @@ export function Dashboard() {
         {/* Network scope */}
         <div className="s-sidebar-section">
           <div className="s-sidebar-section-hd">
-            <span>NETWORK_SCOPE</span>
+            <span>NETWORK SCOPE</span>
             <span className="s-badge">{selectedChains.length}</span>
           </div>
           <div className="s-chain-grid">
@@ -501,12 +541,12 @@ export function Dashboard() {
             onClick={() => void handleRefresh(true)}
             disabled={refreshing || wallets.length === 0}
           >
-            {refreshing ? "SYNCING..." : "EXECUTE_SYNC"}
+            {refreshing ? "SYNCING..." : "EXECUTE SYNC"}
           </button>
           <div className="s-sidebar-sys">
             <span className="s-sys-line">PROVIDERS: ALCHEMY + GOLDRUSH</span>
             <span className="s-sys-line">STORAGE: SQLITE + INDEXEDDB</span>
-            <span className="s-sys-line">LAST_SYNC: {formatRelativeTime(lastRefresh).toUpperCase()}</span>
+            <span className="s-sys-line">LAST SYNC: {formatRelativeTime(lastRefresh).toUpperCase()}</span>
           </div>
         </div>
       </aside>
@@ -518,12 +558,12 @@ export function Dashboard() {
 
           /* Empty state */
           <div className="s-empty">
-            <p className="s-kicker">NO_ACTIVE_PORTFOLIO</p>
+            <p className="s-kicker">NO ACTIVE PORTFOLIO</p>
             <h2 className="s-empty-title">Register wallets to begin tracking.</h2>
             <div className="s-empty-steps">
-              <div className="s-empty-step"><span>01</span><strong>WALLET_INTAKE</strong><p>Add addresses in the left command rail.</p></div>
-              <div className="s-empty-step"><span>02</span><strong>SCOPE_MATRIX</strong><p>Limit the networks you want queried.</p></div>
-              <div className="s-empty-step"><span>03</span><strong>EXECUTE_SYNC</strong><p>Refresh will hydrate and persist the first checkpoints.</p></div>
+              <div className="s-empty-step"><span>01</span><strong>WALLET INTAKE</strong><p>Add addresses in the left command rail.</p></div>
+              <div className="s-empty-step"><span>02</span><strong>SCOPE MATRIX</strong><p>Limit the networks you want queried.</p></div>
+              <div className="s-empty-step"><span>03</span><strong>EXECUTE SYNC</strong><p>Refresh will hydrate and persist the first checkpoints.</p></div>
             </div>
           </div>
 
@@ -531,10 +571,10 @@ export function Dashboard() {
           <>
             {/* ── HERO: Total Net Worth ───────────────────────────────── */}
             <section className="s-hero">
-              <p className="s-kicker">TOTAL_NET_WORTH</p>
+              <p className="s-kicker">TOTAL NET WORTH</p>
               <div className="s-hero-row">
                 <h1 className="s-hero-value">
-                  {syncValueLoading ? <SyncValueLoader label="SYNCING_VALUE" /> : formatCurrency(totalUsd)}
+                  {syncValueLoading ? <SyncValueLoader label="SYNCING VALUE" /> : formatCurrency(totalUsd)}
                 </h1>
                 {heroDelta.amount !== null && (
                   <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
@@ -555,7 +595,7 @@ export function Dashboard() {
             {/* ── WALLET INDEX BAR ───────────────────────────────────── */}
             <section className="s-wallet-bar">
               <div className="s-wallet-bar-label">
-                <span>{wallets.length}_TRACKED_WALLETS</span>
+                <span>{wallets.length} TRACKED WALLETS</span>
               </div>
               <div className="s-wallet-chips">
                 {wallets.map((wallet, i) => (
@@ -585,9 +625,9 @@ export function Dashboard() {
                 {/* Performance Chart */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>TECHNICAL_PERFORMANCE_SNAPSHOT</span>
+                    <span>TECHNICAL PERFORMANCE SNAPSHOT</span>
                     <div className="s-panel-hd-controls">
-                      <span className="s-live-badge">REALTIME_FEED</span>
+                      <span className="s-live-badge">CURRENT SCOPE</span>
                       <div className="s-seg-group">
                         {PERIODS.map((value) => (
                           <button
@@ -604,14 +644,13 @@ export function Dashboard() {
                   </div>
                   <div className="s-panel-body">
                     <Chart points={chartPoints} />
-                    {historyWarning ? <p className="s-warning">{historyWarning}</p> : null}
                   </div>
                 </div>
 
                 {/* Portfolio Command Summary */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>PORTFOLIO_COMMAND_SUMMARY</span>
+                    <span>PORTFOLIO COMMAND SUMMARY</span>
                     <div className="s-seg-group">
                       <button
                         className={`s-seg-btn ${overviewAllocationView === "strip" ? "is-active" : ""}`}
@@ -626,23 +665,23 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-tabs">
-                    <button className={`s-tab ${allocationMode === "token" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("token")}>BY_TOKEN</button>
-                    <button className={`s-tab ${allocationMode === "chain" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("chain")}>BY_NETWORK</button>
-                    <button className={`s-tab ${allocationMode === "wallet" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("wallet")}>BY_WALLET</button>
+                    <button className={`s-tab ${allocationMode === "token" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("token")}>BY TOKEN</button>
+                    <button className={`s-tab ${allocationMode === "chain" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("chain")}>BY NETWORK</button>
+                    <button className={`s-tab ${allocationMode === "wallet" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("wallet")}>BY WALLET</button>
                   </div>
                   <div className="s-panel-body">
                     {overviewAllocationView === "ring" ? (
                       <div className="s-ring-layout">
                         <div>
                           <div className="s-mega">
-                            {syncValueLoading ? <SyncValueLoader label="SYNCING_VALUE" compact /> : formatCurrency(totalUsd)}
+                            {syncValueLoading ? <SyncValueLoader label="SYNCING VALUE" compact /> : formatCurrency(baseTotalUsd)}
                           </div>
                           <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
                             {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
                           </div>
                         </div>
                         <AllocationDonutChart
-                          rows={allocationChartRows}
+                          rows={summaryAllocationChartRows}
                           mode={allocationMode}
                           activeKey={hoveredAllocationKey}
                           onActiveKeyChange={setHoveredAllocationKey}
@@ -651,9 +690,9 @@ export function Dashboard() {
                     ) : (
                       <>
                         <div className="s-alloc-strip" onMouseLeave={() => setHoveredAllocationKey(null)}>
-                          {allocationChartRows.map((row) => {
+                          {summaryAllocationChartRows.map((row) => {
                             const rowKey = allocationRowKey(row);
-                            const isActive = rowKey === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null);
+                            const isActive = rowKey === (summaryActiveAllocationRow ? allocationRowKey(summaryActiveAllocationRow) : null);
                             return (
                               <button
                                 key={rowKey}
@@ -669,10 +708,10 @@ export function Dashboard() {
                           })}
                         </div>
                         <div className="s-alloc-legend">
-                          {overviewLegendRows.map((row) => (
+                          {summaryAllocationChartRows.map((row) => (
                             <div
                               key={allocationRowKey(row)}
-                              className={`s-alloc-legend-row ${allocationRowKey(row) === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null) ? "is-active" : ""}`}
+                              className={`s-alloc-legend-row ${allocationRowKey(row) === (summaryActiveAllocationRow ? allocationRowKey(summaryActiveAllocationRow) : null) ? "is-active" : ""}`}
                               onMouseEnter={() => setHoveredAllocationKey(allocationRowKey(row))}
                               onMouseLeave={() => setHoveredAllocationKey(null)}
                             >
@@ -693,15 +732,15 @@ export function Dashboard() {
                 {/* Asset Inventory */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>ASSET_INVENTORY_TOP_{assets.length}</span>
-                    <span className="s-badge">{assets.length} ROWS</span>
+                    <span>ASSET INVENTORY TOP {assetInventoryRows.length}</span>
+                    <span className="s-badge">{assetInventoryRows.length} ROWS</span>
                   </div>
                   <div className="s-table-shell">
                     <table className="s-table">
                       <thead>
                         <tr>
                           <th>ASSET</th>
-                          <th>VENUE</th>
+                          <th>NETWORK</th>
                           <th>TYPE</th>
                           <th className="align-right">BALANCE</th>
                           <th className="align-right">PRICE</th>
@@ -710,8 +749,8 @@ export function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {assets.map((asset) => (
-                          <tr key={asset.assetId}>
+                        {assetInventoryRows.map((asset) => (
+                          <tr key={asset.key}>
                             <td data-label="Asset">
                               <div className="s-asset-cell">
                                 <div className="s-asset-icon">{asset.symbol.slice(0, 1)}</div>
@@ -721,8 +760,10 @@ export function Dashboard() {
                                 </div>
                               </div>
                             </td>
-                            <td data-label="Venue"><span className="s-tag">{displayNetwork(asset.network)}</span></td>
-                            <td data-label="Type"><span className="s-tag">{asset.network === "hyperliquid" ? "VENUE" : asset.nativeToken ? "NATIVE" : "ERC-20"}</span></td>
+                            <td data-label="Network">
+                              <NetworkBreakdownTag asset={asset} />
+                            </td>
+                            <td data-label="Type"><span className="s-tag">{asset.typeLabel}</span></td>
                             <td data-label="Balance" className="align-right mono">{formatQuantity(asset.quantity)}</td>
                             <td data-label="Price" className="align-right mono">{formatCurrency(asset.priceUsd)}</td>
                             <td data-label="Value" className="align-right mono s-bold">{formatCurrency(asset.valueUsd)}</td>
@@ -742,10 +783,10 @@ export function Dashboard() {
               {/* Network Exposure Board */}
                 <div className="s-panel">
                   <div className="s-panel-hd s-panel-hd-blue">
-                    <span>NETWORK_EXPOSURE_BOARD</span>
+                    <span>NETWORK EXPOSURE BOARD</span>
                   </div>
                   <div className="s-panel-body s-exposure-list">
-                    {(summary?.allocations ?? []).slice(0, 6).map((item, i) => (
+                    {chainAllocationRows.slice(0, 6).map((item, i) => (
                       <div key={item.network} className="s-exposure-row">
                         <div className="s-exposure-meta">
                           <span className="s-exposure-name">{item.displayName.toUpperCase()}</span>
@@ -768,7 +809,7 @@ export function Dashboard() {
                 {/* Allocation Detail */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>ALLOCATION_DETAIL</span>
+                    <span>ALLOCATION DETAIL</span>
                     <span className="s-badge">{allocationMeta.label.toUpperCase()}</span>
                   </div>
                   <div className="s-panel-body">
@@ -785,32 +826,28 @@ export function Dashboard() {
                 {/* System Readout */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>SYSTEM_READOUT</span>
+                    <span>SYSTEM READOUT</span>
                     <span className="s-badge">SERVER</span>
                   </div>
                   <div className="s-panel-body s-readout-list">
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_VENUE</span>
+                      <span className="s-readout-label">TOP NETWORK</span>
                       <strong className="s-readout-val">{topNetwork}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_WALLET</span>
+                      <span className="s-readout-label">TOP WALLET</span>
                       <strong className="s-readout-val">{topWallet}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_ASSET</span>
-                      <strong className="s-readout-val">{assets[0]?.symbol ?? "—"}</strong>
+                      <span className="s-readout-label">TOP ASSET</span>
+                      <strong className="s-readout-val">{assetInventoryRows[0]?.symbol ?? "N/A"}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">HISTORY_PTS</span>
-                      <strong className="s-readout-val mono">{history?.points.length ?? 0}</strong>
-                    </div>
-                    <div className="s-readout-row">
-                      <span className="s-readout-label">NETWORKS_SCOPE</span>
+                      <span className="s-readout-label">NETWORKS SCOPE</span>
                       <strong className="s-readout-val mono">{selectedChains.length}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">DELTA_PERIOD</span>
+                      <span className="s-readout-label">DELTA PERIOD</span>
                       <strong className="s-readout-val mono">{chartDelta.label}</strong>
                     </div>
                   </div>
@@ -819,7 +856,7 @@ export function Dashboard() {
                 {/* Ledger Activity */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>LEDGER_ACTIVITY</span>
+                    <span>LEDGER ACTIVITY</span>
                     <span className="s-badge">{activity.length} EVENTS</span>
                   </div>
                   <div className="s-table-shell">
@@ -861,16 +898,16 @@ export function Dashboard() {
       <footer className="s-footer">
         <div className="s-footer-left">
           <span className="s-dot" />
-          <span>SYSTEM_STABLE</span>
+          <span>SYSTEM STABLE</span>
           <span className="s-sep">|</span>
-          <span>{wallets.length}_TRACKED_WALLETS</span>
+          <span>{wallets.length} TRACKED WALLETS</span>
           <span className="s-sep">|</span>
-          <span>LAST_BLOCK: #{Math.floor(Date.now() / 1000).toLocaleString()}</span>
+          <span>LAST BLOCK: #{Math.floor(Date.now() / 1000).toLocaleString()}</span>
         </div>
         <div className="s-footer-right">
-          <span>TERMINAL_SESSION: {walletHash ? shortHash(walletHash) : "NONE"}</span>
+          <span>TERMINAL SESSION: {walletHash ? shortHash(walletHash) : "NONE"}</span>
           <span className="s-sep">|</span>
-          <span>P&amp;L_TERMINAL_V3</span>
+          <span>P&amp;L TERMINAL V3</span>
         </div>
       </footer>
 
@@ -889,6 +926,28 @@ function MetricTile({ label, value, tone }: { label: string; value: string; tone
       <span className="metric-label">{label}</span>
       <strong className={valueClassName.filter(Boolean).join(" ")}>{value}</strong>
     </article>
+  );
+}
+
+function NetworkBreakdownTag({ asset }: { asset: AssetInventoryRow }) {
+  if (asset.networkBreakdown.length <= 1) {
+    return <span className="s-tag">{asset.networkLabel}</span>;
+  }
+
+  return (
+    <span className="s-network-breakdown-tag">
+      <span className="s-tag">{asset.networkLabel}</span>
+      <span className="s-network-breakdown-popover" role="tooltip">
+        <strong>{asset.symbol} NETWORK BREAKDOWN</strong>
+        {asset.networkBreakdown.map((item) => (
+          <span key={item.network} className="s-network-breakdown-row">
+            <span>{item.label}</span>
+            <span className="mono">{formatShare(item.share)}</span>
+            <span className="mono">{formatCurrency(item.valueUsd)}</span>
+          </span>
+        ))}
+      </span>
+    </span>
   );
 }
 
@@ -1212,7 +1271,7 @@ function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUs
       value: currentTotalUsd,
       current: true,
       timestampLabel: formatHistoryPointTimestamp(currentDate, true),
-      tooltipContext: "Live overview",
+      tooltipContext: "Current wallet/network scope",
     };
     const existingIndex = points.findIndex((point) => point.localDate === currentDate);
     if (existingIndex >= 0) {
@@ -1272,26 +1331,131 @@ function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): Al
   ];
 }
 
+function buildAssetInventoryRows(assets: AssetRow[]): AssetInventoryRow[] {
+  type MutableInventoryRow = Omit<AssetInventoryRow, "priceUsd" | "networkLabel" | "typeLabel"> & {
+    networkSet: Set<string>;
+    valueByNetwork: Map<string, number>;
+    hasNative: boolean;
+    hasWrapped: boolean;
+    hasPlatform: boolean;
+    hasToken: boolean;
+  };
+
+  const rows = new Map<string, MutableInventoryRow>();
+
+  for (const asset of assets) {
+    const canonical = canonicalAsset(asset);
+    const existing = rows.get(canonical.key);
+    if (existing) {
+      existing.quantity += asset.quantity;
+      existing.valueUsd += asset.valueUsd;
+      existing.networkSet.add(asset.network);
+      existing.valueByNetwork.set(asset.network, (existing.valueByNetwork.get(asset.network) ?? 0) + asset.valueUsd);
+      existing.hasNative = existing.hasNative || asset.nativeToken;
+      existing.hasWrapped = existing.hasWrapped || canonical.wrapped;
+      existing.hasPlatform = existing.hasPlatform || asset.network === "hyperliquid";
+      existing.hasToken = existing.hasToken || (!asset.nativeToken && !canonical.wrapped);
+    } else {
+      rows.set(canonical.key, {
+        key: canonical.key,
+        symbol: canonical.symbol,
+        name: canonical.name,
+        quantity: asset.quantity,
+        valueUsd: asset.valueUsd,
+        networks: [],
+        networkBreakdown: [],
+        networkSet: new Set([asset.network]),
+        valueByNetwork: new Map([[asset.network, asset.valueUsd]]),
+        hasNative: asset.nativeToken,
+        hasWrapped: canonical.wrapped,
+        hasPlatform: asset.network === "hyperliquid",
+        hasToken: !asset.nativeToken && !canonical.wrapped,
+      });
+    }
+  }
+
+  return [...rows.values()]
+    .map((row) => {
+      const networks = [...row.networkSet].sort();
+      const networkBreakdown = [...row.valueByNetwork.entries()]
+        .map(([network, valueUsd]) => ({
+          network,
+          label: displayNetwork(network),
+          valueUsd,
+          share: shareOf(valueUsd, row.valueUsd),
+        }))
+        .sort((left, right) => right.valueUsd - left.valueUsd);
+      return {
+        key: row.key,
+        symbol: row.symbol,
+        name: row.name,
+        quantity: row.quantity,
+        priceUsd: row.quantity > 0 ? row.valueUsd / row.quantity : 0,
+        valueUsd: row.valueUsd,
+        networks,
+        networkBreakdown,
+        networkLabel: networks.length === 1 ? displayNetwork(networks[0]) : `${networks.length} NETWORKS`,
+        typeLabel: inventoryTypeLabel(row),
+      };
+    })
+    .sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function inventoryTypeLabel(row: {
+  hasNative: boolean;
+  hasWrapped: boolean;
+  hasPlatform: boolean;
+  hasToken: boolean;
+}): string {
+  if (row.hasPlatform && !row.hasNative && !row.hasWrapped && !row.hasToken) return "PLATFORM";
+  if (row.hasNative && row.hasWrapped) return "NATIVE + WRAPPED";
+  if (row.hasNative) return "NATIVE";
+  if (row.hasWrapped) return "WRAPPED";
+  return "TOKEN";
+}
+
 function buildChainAllocationRows(
   allocations: ChainAllocation[],
-  solanaDefiTotalUsd: number,
+  defiChainValues: Record<string, number>,
 ): ChainAllocation[] {
   const rows = new Map<string, ChainAllocation>();
 
   for (const allocation of allocations) {
-    rows.set(allocation.network, allocation);
+    const key = normalizeNetworkKey(allocation.network);
+    rows.set(key, { ...allocation, network: key });
   }
 
-  if (solanaDefiTotalUsd > 0) {
-    const existing = rows.get("solana");
-    rows.set("solana", {
-      network: "solana",
-      displayName: existing?.displayName ?? "Solana",
-      valueUsd: (existing?.valueUsd ?? 0) + solanaDefiTotalUsd,
+  for (const [chain, valueUsd] of Object.entries(defiChainValues)) {
+    if (valueUsd <= 0) continue;
+    const key = normalizeNetworkKey(chain);
+    const existing = rows.get(key);
+    rows.set(key, {
+      network: key,
+      displayName: existing?.displayName ?? networkDisplayName(key),
+      valueUsd: (existing?.valueUsd ?? 0) + valueUsd,
     });
   }
 
   return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function normalizeNetworkKey(network: string): string {
+  return network.trim().toLowerCase().replace(/-mainnet$/, "");
+}
+
+function networkDisplayName(network: string): string {
+  const names: Record<string, string> = {
+    solana: "Solana",
+    ethereum: "Ethereum",
+    arbitrum: "Arbitrum",
+    base: "Base",
+    polygon: "Polygon",
+    optimism: "Optimism",
+    "binance-smart-chain": "BNB Chain",
+    avalanche: "Avalanche",
+    fantom: "Fantom",
+  };
+  return names[network] ?? network.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function buildWalletAllocationRows(
@@ -1300,19 +1464,22 @@ function buildWalletAllocationRows(
   solanaDefiWalletValues: Record<string, number>,
 ): ChainAllocation[] {
   const labelByAddress = new Map(
-    wallets.map((wallet) => [
-      wallet.normalizedAddress.toLowerCase(),
-      wallet.label?.trim() ? `${wallet.label.trim()} / ${shortAddress(wallet.originalInput)}` : shortAddress(wallet.originalInput),
-    ]),
+    wallets.map((wallet) => {
+      const displayAddress = wallet.originalInput || wallet.normalizedAddress;
+      return [
+        walletKey(wallet.normalizedAddress),
+        wallet.label?.trim() ? `${wallet.label.trim()} / ${shortAddress(displayAddress)}` : shortAddress(displayAddress),
+      ];
+    }),
   );
   const valueByWallet = new Map<string, number>();
 
   for (const allocation of walletAllocations) {
-    valueByWallet.set(allocation.walletAddress.toLowerCase(), allocation.valueUsd);
+    valueByWallet.set(walletKey(allocation.walletAddress), allocation.valueUsd);
   }
 
   for (const [walletAddress, valueUsd] of Object.entries(solanaDefiWalletValues)) {
-    const key = walletAddress.toLowerCase();
+    const key = walletKey(walletAddress);
     valueByWallet.set(key, (valueByWallet.get(key) ?? 0) + valueUsd);
   }
 
@@ -1330,6 +1497,60 @@ function parseWalletInput(value: string): string[] {
     .split(/[\s,;]+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function walletKey(address: string): string {
+  return isValidEvmAddress(address) ? address.toLowerCase() : address;
+}
+
+function reconcileSelectedChains(
+  supportedChains: ChainOption[],
+  savedSelectedChains: string | null,
+  savedChainCatalog: string | null,
+): string[] {
+  const supportedIds = supportedChains.map((chain) => chain.id);
+  if (!savedSelectedChains) {
+    return supportedIds;
+  }
+
+  const supportedIdSet = new Set(supportedIds);
+  const savedIds = savedSelectedChains
+    .split(",")
+    .map((chain) => chain.trim())
+    .filter((chain) => supportedIdSet.has(chain));
+
+  if (savedIds.length === 0) {
+    return supportedIds;
+  }
+
+  const selected = new Set(savedIds);
+  const previousCatalogIds = savedChainCatalog
+    ?.split("|")
+    .map((chain) => chain.trim())
+    .filter(Boolean);
+
+  if (previousCatalogIds && previousCatalogIds.length > 0) {
+    const selectedPreviousCatalog = previousCatalogIds.every((chain) => selected.has(chain));
+    if (selectedPreviousCatalog) {
+      for (const chainId of supportedIds) {
+        if (!previousCatalogIds.includes(chainId)) {
+          selected.add(chainId);
+        }
+      }
+    }
+  } else if (supportedIdSet.has("solana")) {
+    const nonSolanaIds = supportedIds.filter((chain) => chain !== "solana");
+    const selectedAllPreviousEvmChains = nonSolanaIds.length > 0 && nonSolanaIds.every((chain) => selected.has(chain));
+    if (selectedAllPreviousEvmChains) {
+      selected.add("solana");
+    }
+  }
+
+  return supportedIds.filter((chain) => selected.has(chain));
+}
+
+function catalogSignature(chains: ChainOption[]): string {
+  return chains.map((chain) => chain.id).sort().join("|");
 }
 
 function allocationModeMeta(mode: AllocationMode): {
@@ -1504,7 +1725,10 @@ function displayNetwork(network: string): string {
   return network.replace("-mainnet", "").replace(/-/g, " ").toUpperCase();
 }
 
-function shortAddress(value: string): string {
+function shortAddress(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
   return value.length <= 14 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 

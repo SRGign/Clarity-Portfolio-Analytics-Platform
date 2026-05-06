@@ -172,17 +172,116 @@ function pickComparisonPoint(points: PortfolioHistoryPoint[], period: Period): P
 export function groupAllocationsByToken(assets: AssetRow[]): ChainAllocation[] {
   const byToken = new Map<string, ChainAllocation>();
   for (const asset of assets) {
-    const key = asset.symbol;
+    const canonical = canonicalAsset(asset);
+    const key = canonical.symbol;
     const existing = byToken.get(key);
     if (existing) {
       existing.valueUsd += asset.valueUsd;
     } else {
       byToken.set(key, {
         network: key,
-        displayName: asset.symbol,
+        displayName: canonical.symbol,
         valueUsd: asset.valueUsd,
       });
     }
   }
   return [...byToken.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+export function canonicalAsset(asset: AssetRow): {
+  key: string;
+  symbol: string;
+  name: string;
+  wrapped: boolean;
+} {
+  const symbol = normalizeAssetSymbol(asset.symbol);
+  if (asset.nativeToken) {
+    const native = nativeAssetMetadata(asset.network, symbol, asset.name);
+    return {
+      key: `canonical:${native.symbol}`,
+      symbol: native.symbol,
+      name: native.name,
+      wrapped: false,
+    };
+  }
+
+  if (symbol === "WETH") {
+    return {
+      key: "canonical:ETH",
+      symbol: "ETH",
+      name: "Ethereum",
+      wrapped: true,
+    };
+  }
+
+  if (symbol === "USDC" || symbol === "USDC.E") {
+    return {
+      key: "canonical:USDC",
+      symbol: "USDC",
+      name: "USD Coin",
+      wrapped: false,
+    };
+  }
+
+  if (symbol === "USDT") {
+    return {
+      key: "canonical:USDT",
+      symbol: "USDT",
+      name: "Tether",
+      wrapped: false,
+    };
+  }
+
+  const tokenKey = asset.tokenAddress ? `${asset.network}:${asset.tokenAddress.toLowerCase()}` : asset.assetId;
+  return {
+    key: tokenKey,
+    symbol: symbol || "UNKNOWN",
+    name: normalizeNativeName(asset.name) || "Unknown",
+    wrapped: false,
+  };
+}
+
+function nativeAssetMetadata(network: string, symbol: string, name: string): {
+  symbol: string;
+  name: string;
+} {
+  const normalizedNetwork = network.trim().toLowerCase();
+  const normalizedName = normalizeNativeName(name);
+  const known: Record<string, { symbol: string; name: string }> = {
+    "eth-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "arb-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "arbnova-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "opt-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "base-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "zksync-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "linea-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "scroll-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "zora-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "blast-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "polygonzkevm-mainnet": { symbol: "ETH", name: "Ethereum" },
+    "polygon-mainnet": { symbol: "MATIC", name: "Polygon" },
+    "matic-mainnet": { symbol: "MATIC", name: "Polygon" },
+    "bnb-mainnet": { symbol: "BNB", name: "BNB" },
+    "avax-mainnet": { symbol: "AVAX", name: "Avalanche" },
+    "celo-mainnet": { symbol: "CELO", name: "Celo" },
+    "mantle-mainnet": { symbol: "MNT", name: "Mantle" },
+    "moonbeam-mainnet": { symbol: "GLMR", name: "Moonbeam" },
+    "berachain-mainnet": { symbol: "BERA", name: "Berachain" },
+    "zetachain-mainnet": { symbol: "ZETA", name: "ZetaChain" },
+    "apechain-mainnet": { symbol: "APE", name: "ApeCoin" },
+    "solana-mainnet": { symbol: "SOL", name: "Solana" },
+    solana: { symbol: "SOL", name: "Solana" },
+  };
+  return known[normalizedNetwork] ?? {
+    symbol: symbol && symbol !== "NATIVE" ? symbol : "NATIVE",
+    name: normalizedName || "Native Token",
+  };
+}
+
+function normalizeAssetSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase();
+}
+
+function normalizeNativeName(name: string): string {
+  return name.trim().toLowerCase() === "native token" ? "" : name.trim();
 }
