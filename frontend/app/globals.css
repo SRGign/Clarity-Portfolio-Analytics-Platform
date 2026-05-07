@@ -817,7 +817,7 @@ strong {
 .chart-legend {
   position: absolute;
   right: 12px;
-  bottom: 10px;
+  top: 10px;
   z-index: 3;
   display: flex;
   gap: 6px;
@@ -868,6 +868,91 @@ strong {
 .chart-line.is-benchmark {
   stroke-width: 1.8;
   opacity: 0.92;
+}
+
+.chart-axis-label-idx {
+  opacity: 0.55;
+}
+
+.chart-series-toggles {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-right: 12px;
+  padding-right: 12px;
+  border-right: 1px solid var(--line-strong);
+}
+
+.chart-idx-explainer {
+  position: absolute;
+  right: 8px;
+  top: 0;
+  z-index: 4;
+}
+
+.chart-idx-explainer > span {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  cursor: help;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  display: inline-block;
+  transition: border-color 140ms ease-out, color 140ms ease-out;
+}
+
+.chart-idx-explainer:hover > span {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.chart-idx-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 220px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text);
+  z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96) translateY(-4px);
+  transform-origin: top right;
+  transition: opacity 150ms cubic-bezier(0.23, 1, 0.32, 1), transform 150ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.chart-idx-explainer:hover .chart-idx-popover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1) translateY(0);
+}
+
+.chart-idx-popover strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+}
+
+.chart-idx-popover p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.chart-tooltip-idx {
+  margin: 3px 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  opacity: 0.8;
 }
 
 .s-network-breakdown-tag {

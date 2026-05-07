@@ -127,6 +127,7 @@ export function Dashboard() {
   const [positionSummary, setPositionSummary] = useState<LendingPositionSummaryResponse | null>(null);
   const [defiSummary, setDefiSummary] = useState<DefiPositionSummaryResponse | null>(null);
   const [solanaDefiTotals, setSolanaDefiTotals] = useState<SolanaDefiTotals>(EMPTY_SOLANA_DEFI_TOTALS);
+  const [visibleBenchmarks, setVisibleBenchmarks] = useState({ bitcoin: true, solana: true });
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -179,8 +180,12 @@ export function Dashboard() {
     [history?.points, totalUsd],
   );
   const chartPoints = useMemo(
-    () => buildChartPoints(history?.points ?? [], wallets.length > 0 ? totalUsd : null, period),
-    [history?.points, totalUsd, period, wallets.length],
+    () => buildChartPoints(
+      (history?.points ?? []).filter((point) => point.source !== "live-overview"),
+      null,
+      period,
+    ),
+    [history?.points, period],
   );
   const walletAllocationRows = useMemo(
     () => buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets, solanaDefiTotals.walletValues),
@@ -643,8 +648,28 @@ export function Dashboard() {
                 {/* Performance Chart */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>TECHNICAL PERFORMANCE SNAPSHOT</span>
+                    <span>PORTFOLIO PERFORMANCE HISTORY</span>
                     <div className="s-panel-hd-controls">
+                      <div className="chart-series-toggles">
+                        <button
+                          className={`chart-legend-btn ${visibleBenchmarks.bitcoin ? "is-active" : ""}`}
+                          type="button"
+                          disabled={!benchmarks?.bitcoin?.length}
+                          onClick={() => setVisibleBenchmarks((c) => ({ ...c, bitcoin: !c.bitcoin }))}
+                        >
+                          <span className="chart-legend-dot" style={{ backgroundColor: "#F7931A" }} />
+                          BTC
+                        </button>
+                        <button
+                          className={`chart-legend-btn ${visibleBenchmarks.solana ? "is-active" : ""}`}
+                          type="button"
+                          disabled={!benchmarks?.solana?.length}
+                          onClick={() => setVisibleBenchmarks((c) => ({ ...c, solana: !c.solana }))}
+                        >
+                          <span className="chart-legend-dot" style={{ backgroundColor: "#9945FF" }} />
+                          SOL
+                        </button>
+                      </div>
                       <span className="s-live-badge">CURRENT SCOPE</span>
                       <div className="s-seg-group">
                         {PERIODS.map((value) => (
@@ -661,7 +686,7 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-body">
-                    <Chart points={chartPoints} benchmarks={benchmarks} />
+                    <Chart points={chartPoints} benchmarks={benchmarks} visibleBenchmarks={visibleBenchmarks} />
                   </div>
                 </div>
 
@@ -973,13 +998,12 @@ function NetworkBreakdownTag({ asset }: { asset: AssetInventoryRow }) {
   );
 }
 
-function Chart({ points, benchmarks }: { points: ChartPoint[]; benchmarks: BenchmarkData | null }) {
+function Chart({ points, benchmarks, visibleBenchmarks }: {
+  points: ChartPoint[];
+  benchmarks: BenchmarkData | null;
+  visibleBenchmarks: { bitcoin: boolean; solana: boolean };
+}) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const [visibleSeries, setVisibleSeries] = useState({
-    portfolio: true,
-    bitcoin: true,
-    solana: true,
-  });
   const [hoveredPoint, setHoveredPoint] = useState<{
     point: ChartPoint;
     indexValue: number;
@@ -996,16 +1020,17 @@ function Chart({ points, benchmarks }: { points: ChartPoint[]; benchmarks: Bench
   const width = 820;
   const height = 248;
   const padLeft = 84;
-  const padRight = 18;
-  const padTop = 14;
+  const padRight = 52;
+  const padTop = 28;
   const padBottom = 34;
+  const firstPortfolioValue = points[0]?.value ?? 1;
   const portfolioSeries = buildPortfolioIndexSeries(points);
   const bitcoinSeries = benchmarks ? buildBenchmarkSeries(benchmarks.bitcoin, points) : [];
   const solanaSeries = benchmarks ? buildBenchmarkSeries(benchmarks.solana, points) : [];
   const visibleIndexValues = [
-    ...(visibleSeries.portfolio ? portfolioSeries.map((point) => point.indexValue) : []),
-    ...(visibleSeries.bitcoin ? bitcoinSeries.map((point) => point.indexValue) : []),
-    ...(visibleSeries.solana ? solanaSeries.map((point) => point.indexValue) : []),
+    ...portfolioSeries.map((point) => point.indexValue),
+    ...(visibleBenchmarks.bitcoin ? bitcoinSeries.map((point) => point.indexValue) : []),
+    ...(visibleBenchmarks.solana ? solanaSeries.map((point) => point.indexValue) : []),
   ];
   const values = visibleIndexValues.length > 0 ? visibleIndexValues : portfolioSeries.map((point) => point.indexValue);
   const min = Math.min(...values);
@@ -1079,15 +1104,19 @@ function Chart({ points, benchmarks }: { points: ChartPoint[]; benchmarks: Bench
             <g key={tick.key}>
               <line x1={padLeft} y1={tick.y} x2={width - padRight} y2={tick.y} className="chart-grid-line" />
               <text x={padLeft - 10} y={tick.y + 4} textAnchor="end" className="chart-axis-label">
-                {formatIndexAxis(tick.value)}
+                {formatAxisCurrency((tick.value / 100) * firstPortfolioValue)}
+              </text>
+              <text x={width - padRight + 8} y={tick.y + 4} textAnchor="start" className="chart-axis-label chart-axis-label-idx">
+                {tick.value.toFixed(0)}
               </text>
             </g>
           );
         })}
-        {visibleSeries.portfolio ? <path d={areaPath} className="chart-area" /> : null}
-        {visibleSeries.bitcoin && bitcoinPath ? <path d={bitcoinPath} className="chart-line is-benchmark" style={{ stroke: "#F7931A" }} /> : null}
-        {visibleSeries.solana && solanaPath ? <path d={solanaPath} className="chart-line is-benchmark" style={{ stroke: "#9945FF" }} /> : null}
-        {visibleSeries.portfolio ? <path d={linePath} className={`chart-line ${coords[coords.length - 1].indexValue >= coords[0].indexValue ? "is-up" : "is-down"}`} /> : null}
+        <line x1={width - padRight} y1={padTop} x2={width - padRight} y2={height - padBottom} className="chart-axis-line" />
+        <path d={areaPath} className="chart-area" />
+        {visibleBenchmarks.bitcoin && bitcoinPath ? <path d={bitcoinPath} className="chart-line is-benchmark" style={{ stroke: "#F7931A" }} /> : null}
+        {visibleBenchmarks.solana && solanaPath ? <path d={solanaPath} className="chart-line is-benchmark" style={{ stroke: "#9945FF" }} /> : null}
+        <path d={linePath} className={`chart-line ${coords[coords.length - 1].indexValue >= coords[0].indexValue ? "is-up" : "is-down"}`} />
         {interactiveCoords.map((point) => (
           <rect
             key={`${point.localDate}-zone`}
@@ -1124,36 +1153,24 @@ function Chart({ points, benchmarks }: { points: ChartPoint[]; benchmarks: Bench
         <div
           className="chart-tooltip"
           style={{
-            left: `${Math.max(Math.min(hoveredPoint.x + 18, hoveredPoint.width - 196), 12)}px`,
+            left: hoveredPoint.x > hoveredPoint.width * 0.58
+              ? `${Math.max(hoveredPoint.x - 208, 12)}px`
+              : `${Math.min(hoveredPoint.x + 18, hoveredPoint.width - 208)}px`,
             top: `${Math.max(Math.min(hoveredPoint.y - 78, hoveredPoint.height - 96), 12)}px`,
           }}
         >
           <span>{hoveredPoint.point.tooltipContext}</span>
           <strong>{formatCurrency(hoveredPoint.point.value)}</strong>
-          <p>{hoveredPoint.point.timestampLabel} / IDX {hoveredPoint.indexValue.toFixed(1)}</p>
+          <p>{hoveredPoint.point.timestampLabel}</p>
+          <p className="chart-tooltip-idx">IDX {hoveredPoint.indexValue.toFixed(1)}</p>
         </div>
       ) : null}
-      <div className="chart-legend" aria-label="Chart series toggles">
-        <ChartLegendButton
-          label="Portfolio"
-          color="var(--accent)"
-          active={visibleSeries.portfolio}
-          onClick={() => setVisibleSeries((current) => ({ ...current, portfolio: !current.portfolio }))}
-        />
-        <ChartLegendButton
-          label="BTC"
-          color="#F7931A"
-          active={visibleSeries.bitcoin}
-          disabled={bitcoinSeries.length === 0}
-          onClick={() => setVisibleSeries((current) => ({ ...current, bitcoin: !current.bitcoin }))}
-        />
-        <ChartLegendButton
-          label="SOL"
-          color="#9945FF"
-          active={visibleSeries.solana}
-          disabled={solanaSeries.length === 0}
-          onClick={() => setVisibleSeries((current) => ({ ...current, solana: !current.solana }))}
-        />
+      <div className="chart-idx-explainer" aria-label="Performance index info">
+        <span>IDX</span>
+        <div className="chart-idx-popover" role="tooltip">
+          <strong>Performance Index</strong>
+          <p>Rebased to 100 at the start of the period. IDX 115 = portfolio up 15% since start. Allows you to compare your portfolio against BTC and SOL on the same scale.</p>
+        </div>
       </div>
     </div>
   );
@@ -1199,18 +1216,36 @@ function buildBenchmarkSeries(points: BenchmarkData["bitcoin"], chartPoints: Cha
   if (points.length === 0 || chartPoints.length === 0) {
     return [];
   }
-  const firstDate = chartPoints[0].localDate;
-  const lastDate = chartPoints[chartPoints.length - 1].localDate;
-  return points
-    .map((point) => {
-      const localDate = new Date(point.timestamp * 1000).toISOString().slice(0, 10);
-      return {
-        localDate,
-        label: formatShortDate(localDate),
-        indexValue: point.index,
-      };
-    })
-    .filter((point) => point.localDate >= firstDate && point.localDate <= lastDate);
+
+  const benchmarks = points
+    .map((point) => ({
+      localDate: new Date(point.timestamp * 1000).toISOString().slice(0, 10),
+      rawIndex: point.index,
+    }))
+    .sort((left, right) => left.localDate.localeCompare(right.localDate));
+
+  if (benchmarks.length === 0) return [];
+
+  const valueAtOrBefore = (date: string): number | null => {
+    let result: number | null = null;
+    for (const b of benchmarks) {
+      if (b.localDate <= date) result = b.rawIndex;
+      else break;
+    }
+    return result;
+  };
+
+  const baseValue = valueAtOrBefore(chartPoints[0].localDate) ?? benchmarks[0].rawIndex;
+  if (baseValue <= 0) return [];
+
+  return chartPoints.map((cp) => {
+    const value = valueAtOrBefore(cp.localDate) ?? baseValue;
+    return {
+      localDate: cp.localDate,
+      label: cp.label,
+      indexValue: (value / baseValue) * 100,
+    };
+  });
 }
 
 function toChartCoord<T extends { indexValue: number }>(

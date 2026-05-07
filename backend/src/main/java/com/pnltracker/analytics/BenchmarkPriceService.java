@@ -62,18 +62,15 @@ public class BenchmarkPriceService {
             return List.of();
         }
 
-        double firstPrice = prices.get(0).path(1).asDouble(0.0d);
+        double firstPrice = prices.get(0).path("price").asDouble(0.0d);
         if (firstPrice <= 0.0d) {
             return List.of();
         }
 
         List<BenchmarkPoint> points = new ArrayList<>();
         for (JsonNode pricePoint : prices) {
-            if (!pricePoint.isArray() || pricePoint.size() < 2) {
-                continue;
-            }
-            long timestamp = pricePoint.get(0).asLong();
-            double price = pricePoint.get(1).asDouble(0.0d);
+            long timestamp = pricePoint.path("timestamp").asLong();
+            double price = pricePoint.path("price").asDouble(0.0d);
             if (price > 0.0d) {
                 points.add(new BenchmarkPoint(timestamp, price / firstPrice * 100.0d));
             }
