@@ -107,7 +107,7 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
       {state === "loading" ? (
         <div className="s-ai-loading" role="status" aria-live="polite">
           <span className="s-ai-spinner" />
-          <span className="mono">AI_ANALYZING...</span>
+          <span className="mono">AI ANALYZING...</span>
         </div>
       ) : null}
 

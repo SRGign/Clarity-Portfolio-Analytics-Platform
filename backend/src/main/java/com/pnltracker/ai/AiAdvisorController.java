@@ -35,14 +35,17 @@ public class AiAdvisorController {
 
     private final PortfolioContextBuilder contextBuilder;
     private final GeminiApiClient geminiApiClient;
+    private final PortfolioAdvisorFallback portfolioAdvisorFallback;
     private final ObjectMapper objectMapper;
 
     public AiAdvisorController(
             PortfolioContextBuilder contextBuilder,
             GeminiApiClient geminiApiClient,
+            PortfolioAdvisorFallback portfolioAdvisorFallback,
             ObjectMapper objectMapper) {
         this.contextBuilder = contextBuilder;
         this.geminiApiClient = geminiApiClient;
+        this.portfolioAdvisorFallback = portfolioAdvisorFallback;
         this.objectMapper = objectMapper;
     }
 
@@ -50,9 +53,17 @@ public class AiAdvisorController {
     public ResponseEntity<Map<String, Object>> portfolioSummary(@Valid @RequestBody SummaryRequest request) {
         try {
             PortfolioContext context = contextBuilder.build(request.addresses(), request.chains());
-            String response = geminiApiClient.completeJson(
-                    AiAdvisorSystemPrompt.ADVISOR,
-                    formatContext(context));
+            String response;
+            try {
+                response = geminiApiClient.completeJson(
+                        AiAdvisorSystemPrompt.ADVISOR,
+                        formatContext(context));
+            } catch (AiAdvisorException exception) {
+                if (isFallbackEligible(exception)) {
+                    return ResponseEntity.ok(portfolioAdvisorFallback.summarize(context));
+                }
+                throw exception;
+            }
             try {
                 return ResponseEntity.ok(objectMapper.readValue(response, JSON_MAP));
             } catch (Exception exception) {
@@ -158,10 +169,16 @@ public class AiAdvisorController {
     }
 
     private ResponseEntity<Map<String, Object>> aiError(AiAdvisorException exception) {
-        HttpStatus status = "AI_DISABLED".equals(exception.errorCode())
-                ? HttpStatus.SERVICE_UNAVAILABLE
-                : HttpStatus.BAD_GATEWAY;
+        HttpStatus status = switch (exception.errorCode()) {
+            case "AI_DISABLED" -> HttpStatus.SERVICE_UNAVAILABLE;
+            case "AI_RATE_LIMITED" -> HttpStatus.TOO_MANY_REQUESTS;
+            default -> HttpStatus.BAD_GATEWAY;
+        };
         return ResponseEntity.status(status).body(error(exception.errorCode(), exception.getMessage()));
+    }
+
+    private boolean isFallbackEligible(AiAdvisorException exception) {
+        return "AI_RATE_LIMITED".equals(exception.errorCode()) || "AI_UPSTREAM_ERROR".equals(exception.errorCode());
     }
 
     private Map<String, Object> error(String code, String message) {

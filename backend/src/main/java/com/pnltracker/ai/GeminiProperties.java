@@ -9,7 +9,7 @@ public class GeminiProperties {
 
     private String baseUrl = "https://generativelanguage.googleapis.com";
     private String apiKey = "";
-    private String model = "gemini-2.5-pro";
+    private String model = "gemini-2.5-flash";
     private int maxTokens = 2000;
 
     public String getBaseUrl() {

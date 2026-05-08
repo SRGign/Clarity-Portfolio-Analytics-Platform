@@ -55,9 +55,15 @@ public class GeminiApiClient {
                     .body(request)
                     .retrieve()
                     .onStatus(status -> !status.is2xxSuccessful(), (req, resp) -> {
+                        int statusCode = resp.getStatusCode().value();
+                        if (statusCode == 429) {
+                            throw new AiAdvisorException(
+                                    "AI_RATE_LIMITED",
+                                    "Gemini quota limit reached. Retry after the quota resets.");
+                        }
                         throw new AiAdvisorException(
                                 "AI_UPSTREAM_ERROR",
-                                "Gemini request failed with HTTP " + resp.getStatusCode().value());
+                                "Gemini request failed with HTTP " + statusCode);
                     })
                     .body(String.class);
             return extractText(responseBody);
