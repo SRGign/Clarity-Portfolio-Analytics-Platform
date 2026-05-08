@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { requestAiPortfolioChat, requestAiPortfolioSummary, walletSetHash } from "@/lib/portfolio";
@@ -27,8 +27,18 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [error, setError] = useState<AiAdvisorError | null>(null);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
+  const chatLogRef = useRef<HTMLDivElement | null>(null);
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
+
+  useEffect(() => {
+    const log = chatLogRef.current;
+    if (!log) {
+      return;
+    }
+    log.scrollTo({ top: log.scrollHeight, behavior: "smooth" });
+  }, [messages, chatError, chatLoading]);
 
   async function analyze() {
     if (wallets.length === 0 || chains.length === 0) {
@@ -37,6 +47,7 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
 
     setState("loading");
     setError(null);
+    setChatError(null);
     setSummary(null);
     setMessages([]);
 
@@ -64,6 +75,7 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
 
     const nextMessages: AiChatMessage[] = [...messages, { role: "user", text }];
     setMessages(nextMessages);
+    setChatError(null);
     setInput("");
     setChatLoading(true);
 
@@ -71,11 +83,14 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
       const response = await requestAiPortfolioChat(wallets, chains, nextMessages);
       if ("error" in response) {
         setError(response);
+        setChatError(chatFailureMessage(response));
         return;
       }
       setMessages([...nextMessages, { role: "model", text: response.reply }]);
     } catch {
-      setError({ error: "AI_ERROR", message: "AI chat request failed" });
+      const nextError = { error: "AI_ERROR", message: "AI chat request failed" };
+      setError(nextError);
+      setChatError(chatFailureMessage(nextError));
     } finally {
       setChatLoading(false);
     }
@@ -158,17 +173,18 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
           </div>
 
           <div className="s-ai-chat">
-            <div className="s-ai-chat-log">
+            <div className="s-ai-chat-log" ref={chatLogRef}>
               {messages.length === 0 ? (
                 <p className="s-ai-chat-empty">Ask about risk, sizing, liquidity, or DeFi exposure.</p>
               ) : (
                 messages.map((message, index) => (
                   <div key={`${message.role}-${index}`} className={`s-ai-message is-${message.role}`}>
                     <span>{message.role === "user" ? "USER" : "AI"}</span>
-                    <p>{message.text}</p>
+                    <p>{message.role === "model" ? renderAiMessage(message.text) : message.text}</p>
                   </div>
                 ))
               )}
+              {chatError ? <div className="s-ai-chat-error">{chatError}</div> : null}
               {chatLoading ? <div className="s-ai-typing mono">AI_TYPING...</div> : null}
             </div>
             <form className="s-ai-chat-form" onSubmit={sendMessage}>
@@ -226,6 +242,25 @@ function ActionItem({ action }: { action: AiAdvisorAction }) {
       <p>{action.rationale}</p>
     </article>
   );
+}
+
+function renderAiMessage(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function chatFailureMessage(error: AiAdvisorError): string {
+  if (error.error === "AI_RATE_LIMITED") {
+    return "AI chat is temporarily rate-limited. Try again after the quota resets.";
+  }
+  if (error.error === "AI_DISABLED") {
+    return "AI chat is disabled until GEMINI_API_KEY is configured.";
+  }
+  return error.message ?? "AI chat request failed. Try again in a moment.";
 }
 
 function healthColor(score: number): string {

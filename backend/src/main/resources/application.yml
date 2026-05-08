@@ -49,3 +49,12 @@ gemini:
     api-key: ${GEMINI_API_KEY:}
     model: ${GEMINI_MODEL:gemini-2.5-flash}
     max-tokens: 2000
+
+yield:
+  market:
+    defillama:
+      base-url: ${YIELD_DEFILLAMA_BASE_URL:https://yields.llama.fi}
+      min-tvl-usd: ${YIELD_MIN_TVL_USD:50000000}
+      max-apy: ${YIELD_MAX_APY:15}
+      cache-ttl-seconds: ${YIELD_CACHE_TTL_SECONDS:900}
+      max-options: ${YIELD_MAX_OPTIONS:8}

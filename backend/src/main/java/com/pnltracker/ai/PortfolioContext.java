@@ -2,6 +2,7 @@ package com.pnltracker.ai;
 
 import com.pnltracker.domain.AssetBalance;
 import com.pnltracker.domain.ChainAllocation;
+import com.pnltracker.market.StableYieldMarket;
 import com.pnltracker.zerion.ZerionPosition;
 
 import java.util.List;
@@ -17,5 +18,6 @@ public record PortfolioContext(
         double defiAsPctOfPortfolio,
         String largestPositionSymbol,
         double largestPositionPct,
-        double idleStableUsd) {
+        double idleStableUsd,
+        StableYieldMarket stableYieldMarket) {
 }

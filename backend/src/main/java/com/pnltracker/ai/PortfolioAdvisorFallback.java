@@ -1,6 +1,7 @@
 package com.pnltracker.ai;
 
 import com.pnltracker.domain.ChainAllocation;
+import com.pnltracker.market.StableYieldMarket;
 import org.springframework.stereotype.Component;
 
 import java.text.NumberFormat;
@@ -17,12 +18,19 @@ public class PortfolioAdvisorFallback {
     private static final NumberFormat USD = NumberFormat.getCurrencyInstance(Locale.US);
 
     public Map<String, Object> summarize(PortfolioContext context) {
+        return summarize(
+                context,
+                "Gemini quota was unavailable, so this readout used deterministic portfolio rules.");
+    }
+
+    public Map<String, Object> summarize(PortfolioContext context, String fallbackReason) {
         double total = Math.max(context.totalValueUsd(), 0.0d);
         double largestPct = clamp(context.largestPositionPct(), 0.0d, 100.0d);
         double stablePct = clamp(context.stableAllocationPct(), 0.0d, 100.0d);
         double defiPct = clamp(context.defiAsPctOfPortfolio(), 0.0d, 100.0d);
         double largestChainPct = largestChainPct(context);
         double idleStableUsd = Math.max(context.idleStableUsd(), 0.0d);
+        double benchmarkApy = yieldBenchmarkApy(context.stableYieldMarket());
 
         int concentrationPenalty = largestPct >= 50.0d ? 32 : largestPct >= 30.0d ? 22 : largestPct >= 20.0d ? 10 : 0;
         int chainPenalty = largestChainPct >= 75.0d ? 18 : largestChainPct >= 60.0d ? 12 : 0;
@@ -43,10 +51,10 @@ public class PortfolioAdvisorFallback {
                         "yieldEfficiency", yieldEfficiency(total, idleStableUsd),
                         "diversificationScore", diversificationScore(largestPct, largestChainPct),
                         "idleStableUsd", roundMoney(idleStableUsd)),
-                "risks", risks(context, total, largestPct, largestChainPct, stablePct, defiPct, idleStableUsd),
-                "opportunities", opportunities(total, idleStableUsd, stablePct, defiPct),
-                "actions", actions(context, total, largestPct, stablePct, defiPct, idleStableUsd),
-                "caveat", "Not financial advice. Based on on-chain data snapshot. Gemini quota was unavailable, so this readout used deterministic portfolio rules.");
+                "risks", risks(context, total, largestPct, largestChainPct, stablePct, defiPct, idleStableUsd, benchmarkApy),
+                "opportunities", opportunities(total, idleStableUsd, stablePct, defiPct, benchmarkApy),
+                "actions", actions(context, total, largestPct, stablePct, defiPct, idleStableUsd, benchmarkApy),
+                "caveat", "Not financial advice. Market rates and portfolio values can change. " + fallbackReason);
     }
 
     private List<Map<String, Object>> risks(
@@ -56,7 +64,8 @@ public class PortfolioAdvisorFallback {
             double largestChainPct,
             double stablePct,
             double defiPct,
-            double idleStableUsd) {
+            double idleStableUsd,
+            double benchmarkApy) {
         List<Map<String, Object>> risks = new ArrayList<>();
         double largestUsd = total * largestPct / 100.0d;
         if (largestPct >= 30.0d) {
@@ -93,12 +102,13 @@ public class PortfolioAdvisorFallback {
                             + money(Math.max(total * 0.2d - total * stablePct / 100.0d, 0.0d)) + " more stables.",
                     Math.max(total * 0.2d - total * stablePct / 100.0d, 0.0d)));
         }
-        if (idleStableUsd > 0.0d) {
+        if (idleStableUsd > 0.0d && benchmarkApy > 0.0d) {
             risks.add(risk(
                     "LOW",
                     "Idle stable drag",
-                    money(idleStableUsd) + " in stablecoins appears idle. At a 5% APY baseline, that is about "
-                            + money(monthlyYield(idleStableUsd)) + " per month of missed yield.",
+                    money(idleStableUsd) + " in stablecoins appears idle. At the current conservative lending benchmark of "
+                            + pct(benchmarkApy) + ", that is about " + money(monthlyYield(idleStableUsd, benchmarkApy))
+                            + " per month of missed yield.",
                     idleStableUsd));
         }
         if (risks.isEmpty()) {
@@ -112,14 +122,22 @@ public class PortfolioAdvisorFallback {
         return risks.stream().limit(3).toList();
     }
 
-    private List<Map<String, Object>> opportunities(double total, double idleStableUsd, double stablePct, double defiPct) {
+    private List<Map<String, Object>> opportunities(double total, double idleStableUsd, double stablePct, double defiPct, double benchmarkApy) {
         List<Map<String, Object>> opportunities = new ArrayList<>();
-        if (idleStableUsd > 0.0d) {
+        if (idleStableUsd > 0.0d && benchmarkApy > 0.0d) {
             opportunities.add(opportunity(
                     "Deploy idle stables",
                     money(idleStableUsd) + " of idle stablecoins could earn about "
-                            + money(monthlyYield(idleStableUsd)) + " per month at a 5% APY baseline.",
-                    roundMoney(monthlyYield(idleStableUsd)),
+                            + money(monthlyYield(idleStableUsd, benchmarkApy)) + " per month at the current conservative lending benchmark of "
+                            + pct(benchmarkApy) + ".",
+                    roundMoney(monthlyYield(idleStableUsd, benchmarkApy)),
+                    "LOW"));
+        } else if (idleStableUsd > 0.0d) {
+            opportunities.add(opportunity(
+                    "Review idle stables",
+                    money(idleStableUsd)
+                            + " of stablecoins appears idle. Keep it liquid until conservative lending venues are available.",
+                    null,
                     "LOW"));
         }
         if (stablePct < 20.0d) {
@@ -157,7 +175,8 @@ public class PortfolioAdvisorFallback {
             double largestPct,
             double stablePct,
             double defiPct,
-            double idleStableUsd) {
+            double idleStableUsd,
+            double benchmarkApy) {
         List<Map<String, Object>> actions = new ArrayList<>();
         if (largestPct >= 30.0d) {
             double trimUsd = total * (largestPct - 25.0d) / 100.0d;
@@ -173,11 +192,12 @@ public class PortfolioAdvisorFallback {
                     "Add " + money(targetUsd) + " to stables",
                     "A 20% stable buffer improves liquidity without making the portfolio overly defensive."));
         }
-        if (idleStableUsd > 0.0d) {
+        if (idleStableUsd > 0.0d && benchmarkApy > 0.0d) {
             actions.add(action(
                     "THIS_WEEK",
                     "Allocate " + money(idleStableUsd) + " idle stables",
-                    "At a 5% APY baseline, this can recover roughly " + money(monthlyYield(idleStableUsd)) + " per month."));
+                    "At the current conservative lending benchmark of " + pct(benchmarkApy)
+                            + ", this can recover roughly " + money(monthlyYield(idleStableUsd, benchmarkApy)) + " per month."));
         }
         if (defiPct > 40.0d) {
             actions.add(action(
@@ -302,8 +322,12 @@ public class PortfolioAdvisorFallback {
                 .orElse(new ChainAllocation("unknown", "Unknown", null));
     }
 
-    private double monthlyYield(double valueUsd) {
-        return valueUsd * 0.05d / 12.0d;
+    private double monthlyYield(double valueUsd, double apy) {
+        return valueUsd * apy / 100.0d / 12.0d;
+    }
+
+    private double yieldBenchmarkApy(StableYieldMarket market) {
+        return market == null || market.benchmarkApy() == null ? 0.0d : market.benchmarkApy();
     }
 
     private String pct(double value) {

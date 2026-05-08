@@ -1,13 +1,19 @@
 package com.pnltracker.ai;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pnltracker.domain.AssetBalance;
 import com.pnltracker.domain.ChainAllocation;
+import com.pnltracker.market.StableYieldMarket;
+import com.pnltracker.market.StableYieldOpportunity;
+import com.pnltracker.zerion.ZerionPosition;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -38,7 +44,9 @@ class AiAdvisorControllerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody()).containsKeys("healthScore", "healthLabel", "risks", "opportunities", "actions");
-        assertThat(response.getBody().get("caveat")).asString().contains("Gemini quota was unavailable");
+        assertThat(response.getBody().get("caveat")).asString()
+                .contains("Gemini quota was unavailable")
+                .doesNotContain("on-chain data");
     }
 
     @Test
@@ -62,7 +70,229 @@ class AiAdvisorControllerTest {
         assertThat(response.getBody()).containsEntry("error", "AI_DISABLED");
     }
 
+    @Test
+    void portfolioSummaryAcceptsJsonWrappedInMarkdownFence() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext());
+        when(geminiApiClient.completeJson(anyString(), anyString())).thenReturn("""
+                ```json
+                {
+                  "healthScore": 72,
+                  "healthLabel": "GOOD",
+                  "oneLiner": "ETH concentration needs monitoring.",
+                  "metrics": {
+                    "concentrationRisk": "HIGH",
+                    "liquidityScore": 80,
+                    "yieldEfficiency": 90,
+                    "diversificationScore": 65,
+                    "idleStableUsd": 500
+                  },
+                  "risks": [],
+                  "opportunities": [],
+                  "actions": [],
+                  "caveat": "model caveat should be replaced"
+                }
+                ```
+                """);
+
+        ResponseEntity<Map<String, Object>> response = controller.portfolioSummary(
+                new AiAdvisorController.SummaryRequest(List.of("0xabc"), List.of("base")));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).containsEntry("healthScore", 72);
+        assertThat(response.getBody().get("caveat")).asString()
+                .isEqualTo("Not financial advice. Market rates and portfolio values can change.")
+                .doesNotContain("on-chain data")
+                .doesNotContain("malformed JSON");
+    }
+
+    @Test
+    void portfolioSummaryFallsBackWhenGeminiJsonCannotBeParsed() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext());
+        when(geminiApiClient.completeJson(anyString(), anyString()))
+                .thenReturn("I cannot return JSON for this request.");
+
+        ResponseEntity<Map<String, Object>> response = controller.portfolioSummary(
+                new AiAdvisorController.SummaryRequest(List.of("0xabc"), List.of("base")));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).containsKeys("healthScore", "healthLabel", "risks", "opportunities", "actions");
+        assertThat(response.getBody().get("caveat")).asString().contains("malformed JSON");
+    }
+
+    @Test
+    void portfolioSummaryUsesRawProtocolWhenProtocolNameIsMissing() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext(List.of(
+                new ZerionPosition(
+                        "deposit",
+                        250.0d,
+                        1.0d,
+                        250.0d,
+                        6,
+                        null,
+                        null,
+                        "Aave",
+                        "lending",
+                        null,
+                        null,
+                        null,
+                        null,
+                        "USD Coin",
+                        "USDC",
+                        null,
+                        "base",
+                        "0xusdc",
+                        null,
+                        "Base",
+                        null))));
+        when(geminiApiClient.completeJson(anyString(), anyString())).thenReturn("""
+                {
+                  "healthScore": 72,
+                  "healthLabel": "GOOD",
+                  "oneLiner": "Stable exposure needs deployment discipline.",
+                  "metrics": {
+                    "concentrationRisk": "MEDIUM",
+                    "liquidityScore": 80,
+                    "yieldEfficiency": 70,
+                    "diversificationScore": 65,
+                    "idleStableUsd": 500
+                  },
+                  "risks": [],
+                  "opportunities": [],
+                  "actions": [],
+                  "caveat": "model caveat should be replaced"
+                }
+                """);
+
+        controller.portfolioSummary(new AiAdvisorController.SummaryRequest(List.of("0xabc"), List.of("base")));
+
+        ArgumentCaptor<String> contextCaptor = ArgumentCaptor.forClass(String.class);
+        verify(geminiApiClient).completeJson(anyString(), contextCaptor.capture());
+        assertThat(contextCaptor.getValue()).contains("Aave");
+        assertThat(contextCaptor.getValue()).doesNotContain("Unknown protocol");
+    }
+
+    @Test
+    void portfolioSummaryIncludesConservativeStableYieldMarket() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext(List.of(), new StableYieldMarket(
+                List.of(new StableYieldOpportunity(
+                        "pool-1",
+                        "aave-v3",
+                        "Aave V3",
+                        "Ethereum",
+                        "USDC",
+                        4.2d,
+                        4.2d,
+                        0.0d,
+                        250_000_000.0d,
+                        1.75d,
+                        "Conservative filter")),
+                4.2d,
+                java.time.Instant.parse("2026-05-08T00:00:00Z"),
+                "DeFiLlama Yields",
+                false)));
+        when(geminiApiClient.completeJson(anyString(), anyString())).thenReturn("""
+                {
+                  "healthScore": 72,
+                  "healthLabel": "GOOD",
+                  "oneLiner": "Stable exposure has conservative yield options.",
+                  "metrics": {
+                    "concentrationRisk": "MEDIUM",
+                    "liquidityScore": 80,
+                    "yieldEfficiency": 70,
+                    "diversificationScore": 65,
+                    "idleStableUsd": 500
+                  },
+                  "risks": [],
+                  "opportunities": [],
+                  "actions": [],
+                  "caveat": "model caveat should be replaced"
+                }
+                """);
+
+        controller.portfolioSummary(new AiAdvisorController.SummaryRequest(List.of("0xabc"), List.of("base")));
+
+        ArgumentCaptor<String> contextCaptor = ArgumentCaptor.forClass(String.class);
+        verify(geminiApiClient).completeJson(anyString(), contextCaptor.capture());
+        assertThat(contextCaptor.getValue()).contains("CONSERVATIVE STABLE YIELD MARKET");
+        assertThat(contextCaptor.getValue()).contains("DeFiLlama Yields");
+        assertThat(contextCaptor.getValue()).contains("Aave V3");
+        assertThat(contextCaptor.getValue()).contains("protocol-specific TVL floors");
+        assertThat(contextCaptor.getValue()).doesNotContain("TVL >= $50M");
+        assertThat(contextCaptor.getValue()).contains("Market benchmark APY: 4.2%");
+    }
+
+    @Test
+    void portfolioChatFormatsDenseRankedRepliesForDisplay() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext());
+        when(geminiApiClient.completeText(anyString(), any())).thenReturn(
+                "You have idle stables. Options: 1. **SparkLend** on Ethereum - APY 4.0%. "
+                        + "2. **Sky Lending** on Ethereum - APY 3.6%. "
+                        + "Please remember this is not financial advice.");
+
+        ResponseEntity<Map<String, Object>> response = controller.portfolioChat(
+                new AiAdvisorController.ChatRequest(
+                        List.of("0xabc"),
+                        List.of("base"),
+                        List.of(new AiAdvisorController.ChatMessage("user", "where can I deploy idle stables?"))));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().get("reply")).asString()
+                .contains("Options:\n1. **SparkLend**")
+                .contains("\n2. **Sky Lending**")
+                .contains("\n\nPlease remember")
+                .contains("**");
+    }
+
     private static PortfolioContext sampleContext() {
+        return sampleContext(List.of());
+    }
+
+    private static PortfolioContext sampleContext(List<ZerionPosition> evmDefiPositions) {
+        return sampleContext(evmDefiPositions, StableYieldMarket.empty("DeFiLlama Yields"));
+    }
+
+    private static PortfolioContext sampleContext(List<ZerionPosition> evmDefiPositions, StableYieldMarket stableYieldMarket) {
         return new PortfolioContext(
                 10_000.0d,
                 1,
@@ -94,12 +324,17 @@ class AiAdvisorControllerTest {
                                 new BigDecimal("500"),
                                 false,
                                 null)),
-                List.of(),
-                0.0d,
+                evmDefiPositions,
+                evmDefiPositions.stream()
+                        .map(ZerionPosition::value)
+                        .filter(value -> value != null && value > 0.0d)
+                        .mapToDouble(Double::doubleValue)
+                        .sum(),
                 5.0d,
-                0.0d,
+                2.5d,
                 "ETH",
                 50.0d,
-                500.0d);
+                500.0d,
+                stableYieldMarket);
     }
 }

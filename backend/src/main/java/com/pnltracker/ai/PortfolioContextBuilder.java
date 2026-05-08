@@ -4,6 +4,8 @@ import com.pnltracker.domain.AssetBalance;
 import com.pnltracker.domain.PortfolioAnalysis;
 import com.pnltracker.service.PortfolioOverviewService;
 import com.pnltracker.service.StablecoinSymbols;
+import com.pnltracker.market.StableYieldMarket;
+import com.pnltracker.market.StableYieldMarketService;
 import com.pnltracker.zerion.ZerionDeFiService;
 import com.pnltracker.zerion.ZerionPosition;
 import org.springframework.stereotype.Service;
@@ -18,12 +20,15 @@ public class PortfolioContextBuilder {
 
     private final PortfolioOverviewService portfolioOverviewService;
     private final ZerionDeFiService zerionDeFiService;
+    private final StableYieldMarketService stableYieldMarketService;
 
     public PortfolioContextBuilder(
             PortfolioOverviewService portfolioOverviewService,
-            ZerionDeFiService zerionDeFiService) {
+            ZerionDeFiService zerionDeFiService,
+            StableYieldMarketService stableYieldMarketService) {
         this.portfolioOverviewService = portfolioOverviewService;
         this.zerionDeFiService = zerionDeFiService;
+        this.stableYieldMarketService = stableYieldMarketService;
     }
 
     public PortfolioContext build(List<String> addresses, List<String> chains) {
@@ -58,6 +63,8 @@ public class PortfolioContextBuilder {
         AssetBalance largest = sortedAssets.isEmpty() ? null : sortedAssets.get(0);
         double largestValueUsd = largest == null ? 0.0d : toDouble(largest.valueUsd());
         String largestSymbol = largest == null ? "N/A" : nullSafe(largest.symbol());
+        double idleStableUsd = Math.max(stableUsd - stableDefiUsd, 0.0d);
+        StableYieldMarket stableYieldMarket = stableYieldMarketService.conservativeStableLending(idleStableUsd);
 
         return new PortfolioContext(
                 totalValueUsd,
@@ -70,7 +77,8 @@ public class PortfolioContextBuilder {
                 pct(totalDefiValueUsd, totalValueUsd),
                 largestSymbol,
                 pct(largestValueUsd, totalValueUsd),
-                Math.max(stableUsd - stableDefiUsd, 0.0d));
+                idleStableUsd,
+                stableYieldMarket);
     }
 
     private java.util.Optional<String> firstEvmAddress(List<String> addresses) {
