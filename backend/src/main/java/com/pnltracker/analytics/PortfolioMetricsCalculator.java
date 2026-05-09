@@ -60,32 +60,52 @@ public class PortfolioMetricsCalculator {
                 .map(DefiPosition::grossSupplyUsd)
                 .mapToDouble(this::amount)
                 .sum();
-        double defiUsd = amount(overview.defiSummary().visibleNetUsd());
+        double defiExposureUsd = overview.defiPositions().stream()
+                .map(this::exposureUsd)
+                .filter(value -> value != null)
+                .mapToDouble(this::amount)
+                .sum();
+        double defiNetUsd = amount(overview.defiSummary().visibleNetUsd());
         double idleStableUsd = Math.max(stableUsd - stableInDefiUsd, 0.0d);
 
-        List<Double> values = goldRushValues(addresses, chains);
+        List<HistoryValue> values = goldRushValues(addresses, chains);
         TimeSeriesMetrics timeSeries = values.size() < MIN_HISTORY_POINTS
-                ? TimeSeriesMetrics.empty(values.size())
+                ? TimeSeriesMetrics.empty(values)
                 : calculateTimeSeries(values);
 
         return new PortfolioMetrics(
+                totalUsd,
                 concentrationPct,
+                largestUsd,
                 largest == null ? "N/A" : largest.symbol(),
                 concentrationRisk(concentrationPct),
                 pct(stableUsd, totalUsd),
-                pct(defiUsd, totalUsd),
+                stableUsd,
+                pct(defiExposureUsd, totalUsd),
+                defiExposureUsd,
+                defiNetUsd,
+                overview.defiPositions().size(),
                 idleStableUsd,
                 idleStableUsd * ANNUAL_RISK_FREE_RATE / 12.0d,
                 timeSeries.sharpe30d(),
                 timeSeries.sortino30d(),
                 timeSeries.maxDrawdownPct30d(),
+                timeSeries.averageDailyReturnPct30d(),
+                timeSeries.dailyVolatilityPct30d(),
+                timeSeries.downsideDeviationPct30d(),
+                timeSeries.historyStartDate(),
+                timeSeries.historyEndDate(),
+                timeSeries.maxDrawdownPeakDate(),
+                timeSeries.maxDrawdownTroughDate(),
+                timeSeries.maxDrawdownPeakUsd(),
+                timeSeries.maxDrawdownTroughUsd(),
                 timeSeries.historyDaysAvailable());
     }
 
-    private List<Double> goldRushValues(List<String> addresses, List<String> chains) {
+    private List<HistoryValue> goldRushValues(List<String> addresses, List<String> chains) {
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
         Set<LocalDate> requiredDates = new LinkedHashSet<>();
-        for (LocalDate date = today.minusDays(PortfolioHistoryPeriod.D30.lookbackDays());
+        for (LocalDate date = today.minusDays(PortfolioHistoryPeriod.D30.lookbackDays() - 1L);
                 !date.isAfter(today);
                 date = date.plusDays(1)) {
             requiredDates.add(date);
@@ -105,14 +125,14 @@ public class PortfolioMetricsCalculator {
 
         return result.totalsByDate().entrySet().stream()
                 .sorted(java.util.Map.Entry.comparingByKey())
-                .map(entry -> amount(entry.getValue()))
+                .map(entry -> new HistoryValue(entry.getKey(), amount(entry.getValue())))
                 .toList();
     }
 
-    private TimeSeriesMetrics calculateTimeSeries(List<Double> values) {
-        List<Double> returns = dailyReturns(values);
+    private TimeSeriesMetrics calculateTimeSeries(List<HistoryValue> values) {
+        List<Double> returns = dailyReturns(values.stream().map(HistoryValue::valueUsd).toList());
         if (returns.isEmpty()) {
-            return TimeSeriesMetrics.empty(values.size());
+            return TimeSeriesMetrics.empty(values);
         }
 
         double mean = mean(returns);
@@ -129,11 +149,21 @@ public class PortfolioMetricsCalculator {
         Double sortino = downsideReturns.isEmpty() || downsideDeviation == 0.0d
                 ? null
                 : (mean - riskFreeDaily) / downsideDeviation * Math.sqrt(TRADING_DAYS_PER_YEAR);
+        DrawdownPoint drawdown = maxDrawdown(values);
 
         return new TimeSeriesMetrics(
                 sharpe,
                 sortino,
-                maxDrawdownPct(values),
+                drawdown.maxDrawdownPct(),
+                mean * 100.0d,
+                stddev * 100.0d,
+                downsideDeviation * 100.0d,
+                values.get(0).date().toString(),
+                values.get(values.size() - 1).date().toString(),
+                drawdown.peakDate(),
+                drawdown.troughDate(),
+                drawdown.peakUsd(),
+                drawdown.troughUsd(),
                 values.size());
     }
 
@@ -149,12 +179,19 @@ public class PortfolioMetricsCalculator {
         return List.copyOf(returns);
     }
 
-    private double maxDrawdownPct(List<Double> values) {
-        double peak = values.get(0);
+    private DrawdownPoint maxDrawdown(List<HistoryValue> values) {
+        double peak = values.get(0).valueUsd();
+        LocalDate peakDate = values.get(0).date();
+        LocalDate drawdownPeakDate = peakDate;
+        LocalDate troughDate = peakDate;
+        double drawdownPeakUsd = peak;
+        double troughUsd = peak;
         double maxDrawdown = 0.0d;
-        for (double value : values) {
+        for (HistoryValue point : values) {
+            double value = point.valueUsd();
             if (value > peak) {
                 peak = value;
+                peakDate = point.date();
             }
             if (peak <= 0.0d) {
                 continue;
@@ -162,9 +199,18 @@ public class PortfolioMetricsCalculator {
             double drawdown = (peak - value) / peak;
             if (drawdown > maxDrawdown) {
                 maxDrawdown = drawdown;
+                drawdownPeakDate = peakDate;
+                troughDate = point.date();
+                drawdownPeakUsd = peak;
+                troughUsd = value;
             }
         }
-        return -maxDrawdown * 100.0d;
+        return new DrawdownPoint(
+                -maxDrawdown * 100.0d,
+                drawdownPeakDate.toString(),
+                troughDate.toString(),
+                drawdownPeakUsd,
+                troughUsd);
     }
 
     private String concentrationRisk(double concentrationPct) {
@@ -207,14 +253,57 @@ public class PortfolioMetricsCalculator {
         return value == null ? 0.0d : value.doubleValue();
     }
 
+    private BigDecimal exposureUsd(DefiPosition position) {
+        if (position.grossSupplyUsd() != null && position.grossSupplyUsd().signum() != 0) {
+            return position.grossSupplyUsd();
+        }
+        if (position.netUsd() == null) {
+            return null;
+        }
+        return position.netUsd().abs();
+    }
+
+    private record HistoryValue(LocalDate date, double valueUsd) {
+    }
+
+    private record DrawdownPoint(
+            double maxDrawdownPct,
+            String peakDate,
+            String troughDate,
+            double peakUsd,
+            double troughUsd) {
+    }
+
     private record TimeSeriesMetrics(
             Double sharpe30d,
             Double sortino30d,
             Double maxDrawdownPct30d,
+            Double averageDailyReturnPct30d,
+            Double dailyVolatilityPct30d,
+            Double downsideDeviationPct30d,
+            String historyStartDate,
+            String historyEndDate,
+            String maxDrawdownPeakDate,
+            String maxDrawdownTroughDate,
+            Double maxDrawdownPeakUsd,
+            Double maxDrawdownTroughUsd,
             int historyDaysAvailable) {
 
-        static TimeSeriesMetrics empty(int historyDaysAvailable) {
-            return new TimeSeriesMetrics(null, null, null, historyDaysAvailable);
+        static TimeSeriesMetrics empty(List<HistoryValue> values) {
+            return new TimeSeriesMetrics(
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    values.isEmpty() ? null : values.get(0).date().toString(),
+                    values.isEmpty() ? null : values.get(values.size() - 1).date().toString(),
+                    null,
+                    null,
+                    null,
+                    null,
+                    values.size());
         }
     }
 }

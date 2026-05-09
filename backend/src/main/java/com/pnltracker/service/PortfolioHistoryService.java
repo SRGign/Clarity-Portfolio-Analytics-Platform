@@ -29,6 +29,7 @@ import com.pnltracker.domain.ChainDefinition;
 public class PortfolioHistoryService {
 
     private static final String HYPERLIQUID_SCOPE = "hyperliquid";
+    private static final String LIVE_OVERVIEW_SOURCE = "live-overview";
 
     private final ChainCatalogService chainCatalogService;
     private final PortfolioHistoryRepository historyRepository;
@@ -64,8 +65,14 @@ public class PortfolioHistoryService {
         Map<LocalDate, PortfolioHistorySnapshot> storedByDate = new LinkedHashMap<>();
         storedSnapshots.forEach(snapshot -> storedByDate.put(snapshot.localDate(), snapshot));
 
+        Set<LocalDate> storedProviderDates = new TreeSet<>();
+        storedSnapshots.stream()
+                .filter(snapshot -> !isLiveOverviewSnapshot(snapshot))
+                .map(PortfolioHistorySnapshot::localDate)
+                .forEach(storedProviderDates::add);
+
         Set<LocalDate> missingDates = new TreeSet<>(requiredDates);
-        missingDates.removeAll(storedByDate.keySet());
+        missingDates.removeAll(storedProviderDates);
 
         Map<LocalDate, BigDecimal> fetchedTotals = new LinkedHashMap<>();
         Map<LocalDate, LinkedHashSet<String>> fetchedSources = new LinkedHashMap<>();
@@ -114,7 +121,7 @@ public class PortfolioHistoryService {
         List<PortfolioHistoryResultPoint> points = new ArrayList<>();
         for (LocalDate date : requiredDates.stream().sorted().toList()) {
             PortfolioHistorySnapshot stored = storedByDate.get(date);
-            if (stored != null) {
+            if (stored != null && !isLiveOverviewSnapshot(stored)) {
                 points.add(new PortfolioHistoryResultPoint(
                         stored.localDate(),
                         stored.totalUsd(),
@@ -148,18 +155,29 @@ public class PortfolioHistoryService {
 
     public void recordLiveSnapshot(List<String> addresses, List<String> chains, BigDecimal totalUsd) {
         Scope scope = normalizeScope(addresses, chains);
+        LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
+        boolean hasProviderSnapshot = historyRepository.findSnapshots(scope.scopeHash(), today, today).stream()
+                .anyMatch(snapshot -> !isLiveOverviewSnapshot(snapshot));
+        if (hasProviderSnapshot) {
+            return;
+        }
+
         Instant now = Instant.now(clock);
         PortfolioHistorySnapshot snapshot = new PortfolioHistorySnapshot(
                 scope.scopeHash(),
                 scope.addresses(),
                 scope.effectiveChains(),
-                LocalDate.now(clock.withZone(ZoneOffset.UTC)),
+                today,
                 scaleUsd(totalUsd),
-                "live-overview",
+                LIVE_OVERVIEW_SOURCE,
                 false,
                 List.of(),
                 now);
         historyRepository.upsertSnapshots(List.of(snapshot));
+    }
+
+    private boolean isLiveOverviewSnapshot(PortfolioHistorySnapshot snapshot) {
+        return LIVE_OVERVIEW_SOURCE.equals(snapshot.source());
     }
 
     private Scope normalizeScope(List<String> addresses, List<String> chains) {

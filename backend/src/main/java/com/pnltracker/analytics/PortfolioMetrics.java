@@ -1,15 +1,30 @@
 package com.pnltracker.analytics;
 
 public record PortfolioMetrics(
+        double totalUsd,
         double concentrationPct,
+        double concentrationUsd,
         String concentrationAsset,
         String concentrationRisk,
         double stableAllocationPct,
+        double stableUsd,
         double defiAllocationPct,
+        double defiExposureUsd,
+        double defiNetUsd,
+        int defiPositionCount,
         double idleStableUsd,
         double monthlyOpportunityCostUsd,
         Double sharpe30d,
         Double sortino30d,
         Double maxDrawdownPct30d,
+        Double averageDailyReturnPct30d,
+        Double dailyVolatilityPct30d,
+        Double downsideDeviationPct30d,
+        String historyStartDate,
+        String historyEndDate,
+        String maxDrawdownPeakDate,
+        String maxDrawdownTroughDate,
+        Double maxDrawdownPeakUsd,
+        Double maxDrawdownTroughUsd,
         int historyDaysAvailable) {
 }

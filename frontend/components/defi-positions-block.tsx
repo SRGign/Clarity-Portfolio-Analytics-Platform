@@ -16,6 +16,10 @@ type DefiPositionsBlockProps = {
 
 export type SolanaDefiTotals = {
   totalValueUsd: number;
+  protocolExposureUsd: number;
+  protocolPositionCount: number;
+  protocolValues: Record<string, number>;
+  protocolPositionCounts: Record<string, number>;
   walletValues: Record<string, number>;
   chainValues: Record<string, number>;
   loading: boolean;
@@ -264,6 +268,17 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
       return values;
     }, {});
     const totalValueUsd = solanaPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolExposureUsd = state.positions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolValues = state.positions.reduce<Record<string, number>>((values, position) => {
+      const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
+      values[protocolName] = (values[protocolName] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
+    const protocolPositionCounts = state.positions.reduce<Record<string, number>>((counts, position) => {
+      const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
+      counts[protocolName] = (counts[protocolName] ?? 0) + 1;
+      return counts;
+    }, {});
     const chainValues = state.positions
       .filter((position) => !position.alreadyCountedInSpotTotals)
       .reduce<Record<string, number>>((values, position) => {
@@ -274,6 +289,10 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
 
     onSolanaTotalsChange?.({
       totalValueUsd,
+      protocolExposureUsd,
+      protocolPositionCount: state.positions.length,
+      protocolValues,
+      protocolPositionCounts,
       walletValues,
       chainValues,
       loading,

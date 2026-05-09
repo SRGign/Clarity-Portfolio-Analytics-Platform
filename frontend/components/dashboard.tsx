@@ -6,12 +6,14 @@ import { DefiPositionsBlock } from "@/components/defi-positions-block";
 import type { SolanaDefiTotals } from "@/components/defi-positions-block";
 import { AiAdvisorBlock } from "@/components/ai-advisor-block";
 import { PortfolioMetricsBlock } from "@/components/portfolio-metrics-block";
+import { RiskEngineView } from "@/components/risk-engine-view";
 import {
   canonicalAsset,
   computePeriodDelta,
   fetchChains,
   fetchPortfolioBenchmarks,
   fetchPortfolioHistory,
+  fetchPortfolioMetrics,
   groupAllocationsByToken,
   isValidEvmAddress,
   isValidSolanaAddress,
@@ -40,6 +42,7 @@ import type {
   PortfolioHistoryPoint,
   PortfolioHistoryResponse,
   BenchmarkData,
+  PortfolioMetricsResponse,
   PortfolioSummaryResponse,
   WalletRecord,
 } from "@/types/portfolio";
@@ -51,6 +54,10 @@ const OTHER_SWATCH = "#5d6674";
 const MAX_ALLOCATION_SLICES = 6;
 const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
   totalValueUsd: 0,
+  protocolExposureUsd: 0,
+  protocolPositionCount: 0,
+  protocolValues: {},
+  protocolPositionCounts: {},
   walletValues: {},
   chainValues: {},
   loading: false,
@@ -58,6 +65,7 @@ const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
 
 type AllocationMode = "token" | "chain" | "wallet";
 type AllocationView = "strip" | "ring";
+type MainView = "dashboard" | "risk-engine";
 
 type ActivityItem = {
   id: string;
@@ -109,6 +117,13 @@ export function Dashboard() {
   const [summary, setSummary] = useState<PortfolioSummaryResponse | null>(null);
   const [history, setHistory] = useState<PortfolioHistoryResponse | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarkData | null>(null);
+  const [portfolioMetrics, setPortfolioMetrics] = useState<PortfolioMetricsResponse | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
+  const [metricsPartial, setMetricsPartial] = useState(false);
+  const [historyPartial, setHistoryPartial] = useState(false);
+  const [benchmarkPartial, setBenchmarkPartial] = useState(false);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -120,6 +135,7 @@ export function Dashboard() {
   const [period, setPeriod] = useState<Period>("30d");
   const [allocationMode, setAllocationMode] = useState<AllocationMode>("token");
   const [overviewAllocationView, setOverviewAllocationView] = useState<AllocationView>("strip");
+  const [activeView, setActiveView] = useState<MainView>("dashboard");
   const [hoveredAllocationKey, setHoveredAllocationKey] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
   const [positions, setPositions] = useState<LendingPositionResponse[]>([]);
@@ -168,6 +184,7 @@ export function Dashboard() {
   }, [loading, wallets.length, selectedChains.join("|")]);
 
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
+  const selectedChainKey = useMemo(() => selectedChains.slice().sort().join("|"), [selectedChains]);
   const baseTotalUsd = summary?.totalUsd ?? 0;
   const totalUsd = baseTotalUsd + solanaDefiTotals.totalValueUsd;
   const syncValueLoading = wallets.length > 0 && totalUsd === 0 && (refreshing || solanaDefiTotals.loading);
@@ -252,6 +269,13 @@ export function Dashboard() {
       setSummary(null);
       setHistory(null);
       setBenchmarks(null);
+      setPortfolioMetrics(null);
+      setMetricsLoading(false);
+      setHistoryLoading(false);
+      setBenchmarkLoading(false);
+      setMetricsPartial(false);
+      setHistoryPartial(false);
+      setBenchmarkPartial(false);
       setAssets([]);
       setPositions([]);
       setDefiPositions([]);
@@ -338,6 +362,10 @@ export function Dashboard() {
     }
     setHistory(null);
     setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
     setWallets((current) => [...current, ...nextWallets]);
     setInputAddress("");
     setInputLabel("");
@@ -356,6 +384,11 @@ export function Dashboard() {
     setActiveWallet(null);
     setSummary(null);
     setHistory(null);
+    setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
     setAssets([]);
     setPositions([]);
     setDefiPositions([]);
@@ -372,6 +405,11 @@ export function Dashboard() {
       return;
     }
     setHistory(null);
+    setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
     setSelectedChains(nextSelection);
     await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
   }
@@ -381,28 +419,92 @@ export function Dashboard() {
       return;
     }
 
+    let active = true;
+    setMetricsLoading(true);
+    setMetricsPartial(false);
+
+    fetchPortfolioMetrics(wallets, selectedChains)
+      .then((response) => {
+        if (active) {
+          setPortfolioMetrics(response);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setPortfolioMetrics(null);
+          setMetricsPartial(true);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setMetricsLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains]);
+
+  useEffect(() => {
+    if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
+      return;
+    }
+
+    let active = true;
     const loadHistory = async () => {
+      setHistoryLoading(true);
+      setBenchmarkLoading(false);
+      setHistoryPartial(false);
+      setBenchmarkPartial(false);
       try {
         const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
+        if (!active) {
+          return;
+        }
         setHistory(response);
         const startTimestamp = historyStartTimestamp(response.points);
         if (startTimestamp === null) {
           setBenchmarks(null);
+          setBenchmarkPartial(true);
           return;
         }
         try {
-          setBenchmarks(await fetchPortfolioBenchmarks(startTimestamp));
+          setBenchmarkLoading(true);
+          const benchmarkResponse = await fetchPortfolioBenchmarks(startTimestamp);
+          if (active) {
+            setBenchmarks(benchmarkResponse);
+          }
         } catch {
-          setBenchmarks(null);
+          if (active) {
+            setBenchmarks(null);
+            setBenchmarkPartial(true);
+          }
+        } finally {
+          if (active) {
+            setBenchmarkLoading(false);
+          }
         }
       } catch {
-        setHistory(null);
-        setBenchmarks(null);
+        if (active) {
+          setHistory(null);
+          setBenchmarks(null);
+          setHistoryPartial(true);
+          setBenchmarkPartial(true);
+        }
+      } finally {
+        if (active) {
+          setHistoryLoading(false);
+        }
       }
     };
 
     void loadHistory();
-  }, [loading, period, selectedChains, summary, wallets]);
+
+    return () => {
+      active = false;
+    };
+  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains]);
 
   if (loading) {
     return (
@@ -438,7 +540,7 @@ export function Dashboard() {
         <div className="s-topbar-left">
           <span className="s-brand">P&amp;L TERMINAL V3</span>
           <nav className="s-topnav">
-            <span className="s-topnav-active">LIVE SYNC</span>
+            <span className="s-topnav-active">{activeView === "risk-engine" ? "RISK ENGINE" : "LIVE SYNC"}</span>
             <span className="s-topnav-link">{scopeLabel.toUpperCase()}</span>
           </nav>
         </div>
@@ -470,11 +572,23 @@ export function Dashboard() {
 
         {/* Nav */}
         <nav className="s-sidenav">
-          <a className="s-sidenav-item s-sidenav-active">DASHBOARD</a>
-          <a className="s-sidenav-item">ANALYTICS</a>
-          <a className="s-sidenav-item">NETWORK EXPOSURE</a>
-          <a className="s-sidenav-item">ASSET INVENTORY</a>
-          <a className="s-sidenav-item">RISK ENGINE</a>
+          <button
+            className={`s-sidenav-item ${activeView === "dashboard" ? "s-sidenav-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("dashboard")}
+          >
+            DASHBOARD
+          </button>
+          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ANALYTICS</button>
+          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>NETWORK EXPOSURE</button>
+          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ASSET INVENTORY</button>
+          <button
+            className={`s-sidenav-item ${activeView === "risk-engine" ? "s-sidenav-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("risk-engine")}
+          >
+            RISK ENGINE
+          </button>
         </nav>
 
         {/* Wallet intake */}
@@ -590,6 +704,30 @@ export function Dashboard() {
             </div>
           </div>
 
+        ) : activeView === "risk-engine" ? (
+          <RiskEngineView
+            wallets={wallets}
+            chains={selectedChains}
+            portfolioTotalUsd={totalUsd}
+            defiExposureUsd={solanaDefiTotals.protocolExposureUsd}
+            defiPositionCount={solanaDefiTotals.protocolPositionCount}
+            defiLoading={solanaDefiTotals.loading}
+            defiPositions={defiPositions}
+            protocolValues={solanaDefiTotals.protocolValues}
+            protocolPositionCounts={solanaDefiTotals.protocolPositionCounts}
+            metrics={portfolioMetrics}
+            history={history}
+            benchmarks={benchmarks}
+            metricsLoading={metricsLoading}
+            historyLoading={historyLoading}
+            benchmarkLoading={benchmarkLoading}
+            metricsPartial={metricsPartial}
+            historyPartial={historyPartial}
+            benchmarkPartial={benchmarkPartial}
+            refreshing={refreshing}
+            lastRefresh={lastRefresh}
+            onRefresh={() => void handleRefresh(true)}
+          />
         ) : (
           <>
             {/* ── HERO: Total Net Worth ───────────────────────────────── */}
@@ -770,7 +908,17 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <PortfolioMetricsBlock wallets={wallets} chains={selectedChains} />
+                <PortfolioMetricsBlock
+                  wallets={wallets}
+                  chains={selectedChains}
+                  portfolioTotalUsd={totalUsd}
+                  defiExposureUsd={solanaDefiTotals.protocolExposureUsd}
+                  defiPositionCount={solanaDefiTotals.protocolPositionCount}
+                  defiLoading={solanaDefiTotals.loading}
+                  providedMetrics={portfolioMetrics}
+                  providedLoading={metricsLoading}
+                  providedPartial={metricsPartial}
+                />
 
                 <AiAdvisorBlock wallets={wallets} chains={selectedChains} />
 

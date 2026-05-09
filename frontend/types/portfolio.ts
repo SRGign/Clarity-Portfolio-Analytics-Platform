@@ -107,16 +107,31 @@ export type PortfolioHistoryResponse = {
 };
 
 export type PortfolioMetricsResponse = {
+  totalUsd: number;
   concentrationPct: number;
+  concentrationUsd: number;
   concentrationAsset: string;
   concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   stableAllocationPct: number;
+  stableUsd: number;
   defiAllocationPct: number;
+  defiExposureUsd: number;
+  defiNetUsd: number;
+  defiPositionCount: number;
   idleStableUsd: number;
   monthlyOpportunityCostUsd: number;
   sharpe30d: number | null;
   sortino30d: number | null;
   maxDrawdownPct30d: number | null;
+  averageDailyReturnPct30d: number | null;
+  dailyVolatilityPct30d: number | null;
+  downsideDeviationPct30d: number | null;
+  historyStartDate: string | null;
+  historyEndDate: string | null;
+  maxDrawdownPeakDate: string | null;
+  maxDrawdownTroughDate: string | null;
+  maxDrawdownPeakUsd: number | null;
+  maxDrawdownTroughUsd: number | null;
   historyDaysAvailable: number;
 };
 
