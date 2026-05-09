@@ -26,15 +26,17 @@ public class HyperliquidPortfolioHistoryProvider implements PortfolioHistoryProv
     @Override
     public PortfolioHistoryFetchResult fetchHistory(PortfolioHistoryFetchRequest request) {
         Map<LocalDate, BigDecimal> totalsByDate = new LinkedHashMap<>();
+        boolean fetchFailed = false;
         for (String address : request.addresses()) {
             try {
                 HyperliquidReport report = hyperliquidService.fetchReport(address);
                 mergeReportTotals(totalsByDate, report.summary().accountValueHistory(), request.requiredDates());
             } catch (RuntimeException ignored) {
-                // Hyperliquid addresses are optional for a given wallet set; skip empty users quietly.
+                fetchFailed = true;
             }
         }
-        return new PortfolioHistoryFetchResult(SOURCE, totalsByDate, Set.of());
+        Set<String> missingChains = fetchFailed ? Set.of(SOURCE) : Set.of();
+        return new PortfolioHistoryFetchResult(SOURCE, totalsByDate, missingChains);
     }
 
     private void mergeReportTotals(

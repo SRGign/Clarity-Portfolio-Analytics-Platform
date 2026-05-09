@@ -120,9 +120,10 @@ export function PortfolioMetricsBlock({
           tooltip={metrics ? (
             <MetricTooltip
               title="Stablecoin Allocation"
-              copy="This is the cash-like part of the portfolio. More stables usually means less market movement, but also more idle capital if the stables are not being used."
+              copy="This is total stablecoin exposure across spot balances and DeFi positions. Idle stables are tracked separately so deployed lending capital is not treated as unused cash."
               rows={[
-                ["Stable value", formatCurrency(metrics.stableUsd)],
+                ["Total stable exposure", formatCurrency(metrics.stableUsd)],
+                ["Deployed in DeFi", formatCurrency(metrics.deployedStableUsd)],
                 ["Idle stable value", formatCurrency(metrics.idleStableUsd)],
                 ["Monthly cash drag", formatCurrency(metrics.monthlyOpportunityCostUsd)],
                 ["Label means", stableMeaning(metrics.stableAllocationPct)],

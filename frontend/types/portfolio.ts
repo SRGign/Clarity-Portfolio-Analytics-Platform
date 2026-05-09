@@ -114,6 +114,7 @@ export type PortfolioMetricsResponse = {
   concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   stableAllocationPct: number;
   stableUsd: number;
+  deployedStableUsd: number;
   defiAllocationPct: number;
   defiExposureUsd: number;
   defiNetUsd: number;

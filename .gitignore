@@ -61,3 +61,4 @@ backend/*.mv.db
 backend/*.trace.db
 backend/gradle-*/
 backend/*.zip
+.gradle-run/

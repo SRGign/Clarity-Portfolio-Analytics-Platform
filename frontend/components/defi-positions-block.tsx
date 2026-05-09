@@ -2,12 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { isValidEvmAddress, isValidSolanaAddress } from "@/lib/portfolio";
+import { isValidEvmAddress, isValidSolanaAddress, walletSetHash } from "@/lib/portfolio";
+import {
+  readSessionCache,
+  scopedSessionCacheKey,
+  writeSessionCache,
+} from "@/lib/session-cache";
 import type { WalletRecord } from "@/types/portfolio";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8080/api";
 const MIN_POSITION_VALUE_USD = 1;
+const DEFI_POSITIONS_CACHE_PREFIX = "defi-positions-block-v1";
+const DEFI_POSITIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 type DefiPositionsBlockProps = {
   wallets: WalletRecord[];
@@ -22,6 +29,7 @@ export type SolanaDefiTotals = {
   protocolPositionCounts: Record<string, number>;
   walletValues: Record<string, number>;
   chainValues: Record<string, number>;
+  tokenValues: Record<string, number>;
   loading: boolean;
 };
 
@@ -163,8 +171,12 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
   const [gridWidth, setGridWidth] = useState(0);
   const groupsRef = useRef<HTMLDivElement | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
+  const cacheKey = useMemo(
+    () => scopedSessionCacheKey(DEFI_POSITIONS_CACHE_PREFIX, [walletSetHash(wallets)]),
+    [wallets],
+  );
 
-  const loadPositions = useCallback(async () => {
+  const loadPositions = useCallback(async (forceRefresh = false) => {
     activeRequestRef.current?.abort();
 
     if (wallets.length === 0) {
@@ -177,6 +189,19 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
       setLoading(false);
       setError(null);
       return;
+    }
+
+    if (!forceRefresh) {
+      const cachedState = readSessionCache<DefiState>(cacheKey, DEFI_POSITIONS_CACHE_TTL_MS);
+      if (cachedState) {
+        setState({
+          ...cachedState,
+          stale: true,
+        });
+        setLoading(false);
+        setError(null);
+        return;
+      }
     }
 
     const controller = new AbortController();
@@ -222,12 +247,14 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
         fulfilledResults.flatMap((result) => result.failures),
       );
 
-      setState({
+      const nextState = {
         totalValueUsd,
         positions,
         stale: false,
         sourceFailures,
-      });
+      };
+      setState(nextState);
+      writeSessionCache(cacheKey, nextState);
     } catch (loadError) {
       if (controller.signal.aborted) {
         return;
@@ -241,7 +268,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
         activeRequestRef.current = null;
       }
     }
-  }, [wallets]);
+  }, [cacheKey, wallets]);
 
   useEffect(() => {
     void loadPositions();
@@ -286,6 +313,11 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
         values[chain] = (values[chain] ?? 0) + (position.valueUsd ?? 0);
         return values;
       }, {});
+    const tokenValues = solanaPositions.reduce<Record<string, number>>((values, position) => {
+      const symbol = canonicalDefiTokenSymbol(position.tokenSymbol);
+      values[symbol] = (values[symbol] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
 
     onSolanaTotalsChange?.({
       totalValueUsd,
@@ -295,6 +327,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
       protocolPositionCounts,
       walletValues,
       chainValues,
+      tokenValues,
       loading,
     });
   }, [loading, onSolanaTotalsChange, state.positions]);
@@ -359,7 +392,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
         {state.sourceFailures.length > 0 ? (
           <div className="s-defi-source-warning">
             <span>Some chains failed to load: {state.sourceFailures.join(", ")}.</span>
-            <button type="button" className="s-btn-outline" onClick={() => void loadPositions()}>
+            <button type="button" className="s-btn-outline" onClick={() => void loadPositions(true)}>
               Retry
             </button>
           </div>
@@ -990,6 +1023,13 @@ function normalizeChain(value: string): string {
   }
 
   return normalized;
+}
+
+function canonicalDefiTokenSymbol(value: string): string {
+  const symbol = value.trim().toUpperCase();
+  if (symbol === "USDC.E") return "USDC";
+  if (symbol === "WETH") return "ETH";
+  return symbol || "UNKNOWN";
 }
 
 function resolveGroupChain(

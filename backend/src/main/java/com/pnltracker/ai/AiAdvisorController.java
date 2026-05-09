@@ -3,11 +3,11 @@ package com.pnltracker.ai;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pnltracker.analytics.PortfolioMetrics;
 import com.pnltracker.domain.AssetBalance;
 import com.pnltracker.domain.ChainAllocation;
 import com.pnltracker.market.StableYieldMarket;
 import com.pnltracker.market.StableYieldOpportunity;
-import com.pnltracker.zerion.ZerionPosition;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
 import org.springframework.http.HttpStatus;
@@ -118,6 +118,21 @@ public class AiAdvisorController {
                             .append(")\n");
                 });
 
+        builder.append("\n=== TOKEN DISTRIBUTION ===\n");
+        context.tokenExposures().stream()
+                .limit(10)
+                .forEach(exposure -> builder.append(exposure.symbol())
+                        .append(": ")
+                        .append(money(exposure.totalUsd()))
+                        .append(" total visible exposure, ")
+                        .append(PCT.format(exposure.sharePct()))
+                        .append("% of portfolio")
+                        .append(" (spot ")
+                        .append(money(exposure.spotUsd()))
+                        .append(", DeFi ")
+                        .append(money(exposure.defiUsd()))
+                        .append(")\n"));
+
         builder.append("\n=== TOP HOLDINGS ===\n");
         context.topAssets().stream()
                 .sorted(Comparator.comparing(AssetBalance::valueUsd).reversed())
@@ -135,17 +150,27 @@ public class AiAdvisorController {
                 });
 
         builder.append("\n=== ACTIVE DEFI POSITIONS ===\n");
-        context.evmDefiPositions().forEach(position -> builder.append("[")
-                .append(fallback(position.chain(), "unknown"))
-                .append("] ")
-                .append(protocolLabel(position))
-                .append(" | ")
-                .append(fallback(position.positionType(), "position"))
-                .append(" | ")
-                .append(fallback(position.tokenSymbol(), "UNKNOWN"))
-                .append(" | ")
-                .append(money(position.value() == null ? 0.0d : position.value()))
-                .append("\n"));
+        context.defiPositions().stream()
+                .limit(16)
+                .forEach(position -> builder.append("[")
+                        .append(fallback(position.chain(), "unknown"))
+                        .append("] ")
+                        .append(fallback(position.protocolName(), "Unknown protocol"))
+                        .append(" | ")
+                        .append(fallback(position.protocolModule(), "module unknown"))
+                        .append(" | ")
+                        .append(fallback(position.positionType(), "position"))
+                        .append(" | ")
+                        .append(fallback(position.tokenSymbol(), "UNKNOWN"))
+                        .append(" | ")
+                        .append(money(position.valueUsd()))
+                        .append(position.debtUsd() > 0.0d ? " debt " + money(position.debtUsd()) : "")
+                        .append("\n"));
+        if (context.defiPositions().size() > 16) {
+            builder.append("Additional DeFi positions: ")
+                    .append(context.defiPositions().size() - 16)
+                    .append(" smaller rows not expanded.\n");
+        }
         builder.append("Total in DeFi: ")
                 .append(money(context.totalDefiValueUsd()))
                 .append(" (")
@@ -156,17 +181,62 @@ public class AiAdvisorController {
         builder.append("Stablecoin allocation: ")
                 .append(PCT.format(context.stableAllocationPct()))
                 .append("%\n");
+        builder.append("Total stablecoin exposure: ")
+                .append(money(context.stableUsd()))
+                .append("\n");
+        builder.append("Stablecoins deployed in DeFi: ")
+                .append(money(context.deployedStableUsd()))
+                .append("\n");
         builder.append("Idle stables (earning 0%): ")
                 .append(money(context.idleStableUsd()))
                 .append("\n");
-        builder.append("Largest single position: ")
+        builder.append("Largest non-stable position: ")
                 .append(context.largestPositionSymbol())
                 .append(" at ")
                 .append(PCT.format(context.largestPositionPct()))
                 .append("%\n");
 
+        appendRiskMetrics(builder, context.riskMetrics());
         appendStableYieldMarket(builder, context);
         return builder.toString();
+    }
+
+    private void appendRiskMetrics(StringBuilder builder, PortfolioMetrics metrics) {
+        builder.append("\n=== RISK METRICS ===\n");
+        if (metrics == null) {
+            builder.append("Risk metrics are not available for this snapshot.\n");
+            return;
+        }
+        builder.append("Non-stable concentration risk: ")
+                .append(metrics.concentrationRisk())
+                .append(" | ")
+                .append(metrics.concentrationAsset())
+                .append(" ")
+                .append(PCT.format(metrics.concentrationPct()))
+                .append("% (")
+                .append(money(metrics.concentrationUsd()))
+                .append(")\n");
+        builder.append("DeFi exposure: ")
+                .append(money(metrics.defiExposureUsd()))
+                .append(" across ")
+                .append(metrics.defiPositionCount())
+                .append(" tracked positions, ")
+                .append(PCT.format(metrics.defiAllocationPct()))
+                .append("% of portfolio\n");
+        builder.append("30d Sharpe: ")
+                .append(nullableNumber(metrics.sharpe30d()))
+                .append(" | Sortino: ")
+                .append(nullableNumber(metrics.sortino30d()))
+                .append(" | Max drawdown: ")
+                .append(nullablePct(metrics.maxDrawdownPct30d()))
+                .append("\n");
+        builder.append("30d avg daily return: ")
+                .append(nullablePct(metrics.averageDailyReturnPct30d()))
+                .append(" | daily volatility: ")
+                .append(nullablePct(metrics.dailyVolatilityPct30d()))
+                .append(" | history days: ")
+                .append(metrics.historyDaysAvailable())
+                .append("\n");
     }
 
     private void appendStableYieldMarket(StringBuilder builder, PortfolioContext context) {
@@ -330,22 +400,12 @@ public class AiAdvisorController {
         return value == null || value.isBlank() ? fallback : value;
     }
 
-    private String protocolLabel(ZerionPosition position) {
-        return firstPresent(
-                position.protocolName(),
-                position.protocol(),
-                position.dapp(),
-                position.protocolModule(),
-                "Unknown protocol");
+    private String nullableNumber(Double value) {
+        return value == null ? "N/A" : PCT.format(value);
     }
 
-    private String firstPresent(String... values) {
-        for (String value : values) {
-            if (value != null && !value.isBlank()) {
-                return value;
-            }
-        }
-        return "";
+    private String nullablePct(Double value) {
+        return value == null ? "N/A" : PCT.format(value) + "%";
     }
 
     public record SummaryRequest(

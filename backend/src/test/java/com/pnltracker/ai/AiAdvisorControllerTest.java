@@ -12,7 +12,6 @@ import com.pnltracker.domain.AssetBalance;
 import com.pnltracker.domain.ChainAllocation;
 import com.pnltracker.market.StableYieldMarket;
 import com.pnltracker.market.StableYieldOpportunity;
-import com.pnltracker.zerion.ZerionPosition;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -146,28 +145,16 @@ class AiAdvisorControllerTest {
                 new ObjectMapper());
 
         when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext(List.of(
-                new ZerionPosition(
-                        "deposit",
-                        250.0d,
-                        1.0d,
-                        250.0d,
-                        6,
-                        null,
-                        null,
+                new AiDefiPosition(
+                        "base",
                         "Aave",
                         "lending",
-                        null,
-                        null,
-                        null,
-                        null,
-                        "USD Coin",
+                        "deposit",
                         "USDC",
-                        null,
-                        "base",
-                        "0xusdc",
-                        null,
-                        "Base",
-                        null))));
+                        250.0d,
+                        250.0d,
+                        0.0d,
+                        true))));
         when(geminiApiClient.completeJson(anyString(), anyString())).thenReturn("""
                 {
                   "healthScore": 72,
@@ -193,6 +180,57 @@ class AiAdvisorControllerTest {
         verify(geminiApiClient).completeJson(anyString(), contextCaptor.capture());
         assertThat(contextCaptor.getValue()).contains("Aave");
         assertThat(contextCaptor.getValue()).doesNotContain("Unknown protocol");
+    }
+
+    @Test
+    void portfolioSummarySendsAddressRedactedContextToGemini() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext(List.of(
+                new AiDefiPosition(
+                        "solana",
+                        "Kamino Lend",
+                        "lending",
+                        "deposit",
+                        "USDC",
+                        1_000.0d,
+                        1_000.0d,
+                        0.0d,
+                        false))));
+        when(geminiApiClient.completeJson(anyString(), anyString())).thenReturn("""
+                {
+                  "healthScore": 72,
+                  "healthLabel": "GOOD",
+                  "oneLiner": "Stable exposure needs deployment discipline.",
+                  "metrics": {
+                    "concentrationRisk": "MEDIUM",
+                    "liquidityScore": 80,
+                    "yieldEfficiency": 70,
+                    "diversificationScore": 65,
+                    "idleStableUsd": 500
+                  },
+                  "risks": [],
+                  "opportunities": [],
+                  "actions": [],
+                  "caveat": "model caveat should be replaced"
+                }
+                """);
+
+        controller.portfolioSummary(new AiAdvisorController.SummaryRequest(List.of("0xabc"), List.of("base")));
+
+        ArgumentCaptor<String> contextCaptor = ArgumentCaptor.forClass(String.class);
+        verify(geminiApiClient).completeJson(anyString(), contextCaptor.capture());
+        assertThat(contextCaptor.getValue())
+                .contains("Kamino Lend")
+                .doesNotContain("0xabc")
+                .doesNotContain("walletAddress")
+                .doesNotContain("wallet address");
     }
 
     @Test
@@ -288,17 +326,20 @@ class AiAdvisorControllerTest {
         return sampleContext(List.of());
     }
 
-    private static PortfolioContext sampleContext(List<ZerionPosition> evmDefiPositions) {
-        return sampleContext(evmDefiPositions, StableYieldMarket.empty("DeFiLlama Yields"));
+    private static PortfolioContext sampleContext(List<AiDefiPosition> defiPositions) {
+        return sampleContext(defiPositions, StableYieldMarket.empty("DeFiLlama Yields"));
     }
 
-    private static PortfolioContext sampleContext(List<ZerionPosition> evmDefiPositions, StableYieldMarket stableYieldMarket) {
+    private static PortfolioContext sampleContext(List<AiDefiPosition> defiPositions, StableYieldMarket stableYieldMarket) {
         return new PortfolioContext(
                 10_000.0d,
                 1,
                 List.of(
                         new ChainAllocation("base", "Base", new BigDecimal("7000")),
                         new ChainAllocation("solana", "Solana", new BigDecimal("3000"))),
+                List.of(
+                        new TokenExposure("ETH", 5_000.0d, 5_000.0d, 0.0d, 50.0d),
+                        new TokenExposure("USDC", 500.0d, 500.0d, 0.0d, 5.0d)),
                 List.of(
                         new AssetBalance(
                                 "base:eth",
@@ -324,17 +365,18 @@ class AiAdvisorControllerTest {
                                 new BigDecimal("500"),
                                 false,
                                 null)),
-                evmDefiPositions,
-                evmDefiPositions.stream()
-                        .map(ZerionPosition::value)
-                        .filter(value -> value != null && value > 0.0d)
-                        .mapToDouble(Double::doubleValue)
+                defiPositions,
+                defiPositions.stream()
+                        .mapToDouble(AiDefiPosition::valueUsd)
                         .sum(),
+                500.0d,
+                0.0d,
                 5.0d,
                 2.5d,
                 "ETH",
                 50.0d,
                 500.0d,
+                null,
                 stableYieldMarket);
     }
 }

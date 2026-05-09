@@ -28,30 +28,29 @@ import com.pnltracker.domain.ChainDefinition;
 @Service
 public class PortfolioHistoryService {
 
-    private static final String HYPERLIQUID_SCOPE = "hyperliquid";
-    private static final String LIVE_OVERVIEW_SOURCE = "live-overview";
+    private static final String GOLDRUSH_SOURCE = "goldrush";
 
     private final ChainCatalogService chainCatalogService;
     private final PortfolioHistoryRepository historyRepository;
-    private final List<PortfolioHistoryProvider> historyProviders;
+    private final PortfolioHistoryProvider historyProvider;
     private final Clock clock;
 
     @Autowired
     public PortfolioHistoryService(
             ChainCatalogService chainCatalogService,
             PortfolioHistoryRepository historyRepository,
-            List<PortfolioHistoryProvider> historyProviders) {
-        this(chainCatalogService, historyRepository, historyProviders, Clock.systemUTC());
+            GoldRushPortfolioHistoryProvider goldRushPortfolioHistoryProvider) {
+        this(chainCatalogService, historyRepository, goldRushPortfolioHistoryProvider, Clock.systemUTC());
     }
 
     PortfolioHistoryService(
             ChainCatalogService chainCatalogService,
             PortfolioHistoryRepository historyRepository,
-            List<PortfolioHistoryProvider> historyProviders,
+            PortfolioHistoryProvider historyProvider,
             Clock clock) {
         this.chainCatalogService = chainCatalogService;
         this.historyRepository = historyRepository;
-        this.historyProviders = List.copyOf(historyProviders);
+        this.historyProvider = historyProvider;
         this.clock = clock;
     }
 
@@ -61,13 +60,14 @@ public class PortfolioHistoryService {
         LocalDate fromDate = today.minusDays(period.lookbackDays());
         Set<LocalDate> requiredDates = requiredDates(fromDate, today);
 
-        List<PortfolioHistorySnapshot> storedSnapshots = historyRepository.findSnapshots(scope.scopeHash(), fromDate, today);
+        List<PortfolioHistorySnapshot> storedSnapshots = historyRepository.findSnapshots(scope.scopeHash(), fromDate, today).stream()
+                .filter(snapshot -> GOLDRUSH_SOURCE.equals(snapshot.source()))
+                .toList();
         Map<LocalDate, PortfolioHistorySnapshot> storedByDate = new LinkedHashMap<>();
         storedSnapshots.forEach(snapshot -> storedByDate.put(snapshot.localDate(), snapshot));
 
         Set<LocalDate> storedProviderDates = new TreeSet<>();
         storedSnapshots.stream()
-                .filter(snapshot -> !isLiveOverviewSnapshot(snapshot))
                 .map(PortfolioHistorySnapshot::localDate)
                 .forEach(storedProviderDates::add);
 
@@ -84,17 +84,15 @@ public class PortfolioHistoryService {
                     missingDates,
                     period);
 
-            for (PortfolioHistoryProvider provider : historyProviders) {
-                PortfolioHistoryFetchResult fetchResult = provider.fetchHistory(fetchRequest);
-                missingChains.addAll(fetchResult.missingChains());
-                fetchResult.totalsByDate().forEach((localDate, totalUsd) -> {
-                    if (!missingDates.contains(localDate)) {
-                        return;
-                    }
-                    fetchedTotals.merge(localDate, totalUsd, BigDecimal::add);
-                    fetchedSources.computeIfAbsent(localDate, ignored -> new LinkedHashSet<>()).add(fetchResult.source());
-                });
-            }
+            PortfolioHistoryFetchResult fetchResult = historyProvider.fetchHistory(fetchRequest);
+            missingChains.addAll(fetchResult.missingChains());
+            fetchResult.totalsByDate().forEach((localDate, totalUsd) -> {
+                if (!missingDates.contains(localDate)) {
+                    return;
+                }
+                fetchedTotals.put(localDate, totalUsd);
+                fetchedSources.computeIfAbsent(localDate, ignored -> new LinkedHashSet<>()).add(fetchResult.source());
+            });
 
             Instant now = Instant.now(clock);
             List<PortfolioHistorySnapshot> newSnapshots = fetchedTotals.entrySet().stream()
@@ -121,7 +119,7 @@ public class PortfolioHistoryService {
         List<PortfolioHistoryResultPoint> points = new ArrayList<>();
         for (LocalDate date : requiredDates.stream().sorted().toList()) {
             PortfolioHistorySnapshot stored = storedByDate.get(date);
-            if (stored != null && !isLiveOverviewSnapshot(stored)) {
+            if (stored != null) {
                 points.add(new PortfolioHistoryResultPoint(
                         stored.localDate(),
                         stored.totalUsd(),
@@ -153,33 +151,6 @@ public class PortfolioHistoryService {
                 Instant.now(clock));
     }
 
-    public void recordLiveSnapshot(List<String> addresses, List<String> chains, BigDecimal totalUsd) {
-        Scope scope = normalizeScope(addresses, chains);
-        LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
-        boolean hasProviderSnapshot = historyRepository.findSnapshots(scope.scopeHash(), today, today).stream()
-                .anyMatch(snapshot -> !isLiveOverviewSnapshot(snapshot));
-        if (hasProviderSnapshot) {
-            return;
-        }
-
-        Instant now = Instant.now(clock);
-        PortfolioHistorySnapshot snapshot = new PortfolioHistorySnapshot(
-                scope.scopeHash(),
-                scope.addresses(),
-                scope.effectiveChains(),
-                today,
-                scaleUsd(totalUsd),
-                LIVE_OVERVIEW_SOURCE,
-                false,
-                List.of(),
-                now);
-        historyRepository.upsertSnapshots(List.of(snapshot));
-    }
-
-    private boolean isLiveOverviewSnapshot(PortfolioHistorySnapshot snapshot) {
-        return LIVE_OVERVIEW_SOURCE.equals(snapshot.source());
-    }
-
     private Scope normalizeScope(List<String> addresses, List<String> chains) {
         List<String> normalizedAddresses = addresses.stream()
                 .map(String::trim)
@@ -194,7 +165,6 @@ public class PortfolioHistoryService {
 
         List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains);
         List<String> effectiveChains = new ArrayList<>(resolvedChains.stream().map(ChainDefinition::id).sorted().toList());
-        effectiveChains.add(HYPERLIQUID_SCOPE);
         effectiveChains = effectiveChains.stream().distinct().sorted().toList();
 
         return new Scope(

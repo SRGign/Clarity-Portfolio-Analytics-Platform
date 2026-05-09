@@ -231,7 +231,7 @@ export function RiskEngineView({
               value={metrics ? formatPct(metrics.stableAllocationPct) : "PARTIAL"}
               tone={metrics ? stableTone(metrics.stableAllocationPct) : "muted"}
               meaning={metrics ? stableMeaning(metrics.stableAllocationPct) : "Stable allocation is not ready yet."}
-              inputs={metrics ? `${formatCurrency(metrics.stableUsd)} stables, ${formatCurrency(metrics.idleStableUsd)} idle` : "Stable module pending"}
+              inputs={metrics ? `${formatCurrency(metrics.stableUsd)} stable exposure, ${formatCurrency(metrics.idleStableUsd)} idle` : "Stable module pending"}
             />
             <RiskRow
               label="DeFi Exposure"
@@ -539,13 +539,14 @@ function buildRiskModules({
       status: metrics ? "LIVE" : "BUILDING",
       value: metrics ? formatPct(metrics.stableAllocationPct) : "ACCUMULATING",
       detail: metrics
-        ? `${formatCurrency(metrics.stableUsd)} sits in stablecoins, with ${formatCurrency(metrics.idleStableUsd)} currently idle.`
+        ? `${formatCurrency(metrics.stableUsd)} sits in stablecoin exposure, with ${formatCurrency(metrics.deployedStableUsd)} deployed in DeFi and ${formatCurrency(metrics.idleStableUsd)} currently idle.`
         : "Stablecoin exposure appears when portfolio metrics are ready.",
       footnote: "Issuer and wrapper mapping can refine this further.",
       tone: metrics ? stableTone(metrics.stableAllocationPct) : "muted",
       rows: [
         ["Stable value", metrics ? formatCurrency(metrics.stableUsd) : "N/A"],
         ["Idle stables", metrics ? formatCurrency(metrics.idleStableUsd) : "N/A"],
+        ["Deployed stables", metrics ? formatCurrency(metrics.deployedStableUsd) : "N/A"],
         ["Monthly drag", metrics ? formatCurrency(metrics.monthlyOpportunityCostUsd) : "N/A"],
       ],
     },

@@ -8,6 +8,7 @@ public record PortfolioMetrics(
         String concentrationRisk,
         double stableAllocationPct,
         double stableUsd,
+        double deployedStableUsd,
         double defiAllocationPct,
         double defiExposureUsd,
         double defiNetUsd,

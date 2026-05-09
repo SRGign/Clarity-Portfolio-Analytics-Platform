@@ -44,7 +44,7 @@ public class PortfolioAdvisorFallback {
         return Map.of(
                 "healthScore", healthScore,
                 "healthLabel", healthLabel(healthScore),
-                "oneLiner", oneLiner(concentrationRisk, context.largestPositionSymbol(), largestPct),
+                "oneLiner", oneLiner(concentrationRisk, context.largestPositionSymbol(), largestPct, largestChainPct),
                 "metrics", Map.of(
                         "concentrationRisk", concentrationRisk,
                         "liquidityScore", liquidityScore(stablePct, defiPct),
@@ -239,9 +239,12 @@ public class PortfolioAdvisorFallback {
                 "rationale", rationale);
     }
 
-    private String oneLiner(String concentrationRisk, String symbol, double largestPct) {
-        if ("CRITICAL".equals(concentrationRisk) || "HIGH".equals(concentrationRisk)) {
+    private String oneLiner(String concentrationRisk, String symbol, double largestPct, double largestChainPct) {
+        if (largestPct >= 30.0d) {
             return symbol + " concentration is the primary portfolio risk.";
+        }
+        if (("CRITICAL".equals(concentrationRisk) || "HIGH".equals(concentrationRisk)) && largestChainPct >= 60.0d) {
+            return "Chain concentration is the primary portfolio risk.";
         }
         if (largestPct < 20.0d) {
             return "Portfolio risk is balanced with no dominant position.";

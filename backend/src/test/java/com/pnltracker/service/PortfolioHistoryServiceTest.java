@@ -29,13 +29,11 @@ class PortfolioHistoryServiceTest {
     }
 
     @Test
-    void aggregatesProviderHistoryAndReusesPersistedSnapshots() {
+    void persistsGoldRushHistoryAndReusesPersistedSnapshots() {
         PortfolioHistoryService service = new PortfolioHistoryService(
                 new ChainCatalogService(),
                 repository,
-                List.of(
-                        request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
-                        request -> new PortfolioHistoryFetchResult("hyperliquid", values(request.requiredDates(), "50.00", "55.00"), Set.of())),
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
                 FIXED_CLOCK);
 
         PortfolioHistoryResult first = service.getHistory(
@@ -45,8 +43,9 @@ class PortfolioHistoryServiceTest {
 
         assertThat(first.points()).hasSize(2);
         assertThat(first.points()).allMatch(point -> !point.persisted());
-        assertThat(first.points().get(0).totalUsd()).isEqualByComparingTo("150.00");
-        assertThat(first.points().get(1).totalUsd()).isEqualByComparingTo("165.00");
+        assertThat(first.points()).extracting(PortfolioHistoryResultPoint::source).containsOnly("goldrush");
+        assertThat(first.points().get(0).totalUsd()).isEqualByComparingTo("100.00");
+        assertThat(first.points().get(1).totalUsd()).isEqualByComparingTo("110.00");
 
         PortfolioHistoryResult second = service.getHistory(
                 List.of("0xabc"),
@@ -63,9 +62,7 @@ class PortfolioHistoryServiceTest {
         PortfolioHistoryService service = new PortfolioHistoryService(
                 new ChainCatalogService(),
                 repository,
-                List.of(
-                        request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "80.00", "90.00"), Set.of("linea")),
-                        request -> new PortfolioHistoryFetchResult("hyperliquid", Map.of(), Set.of())),
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "80.00", "90.00"), Set.of("linea")),
                 FIXED_CLOCK);
 
         PortfolioHistoryResult result = service.getHistory(
@@ -79,14 +76,19 @@ class PortfolioHistoryServiceTest {
     }
 
     @Test
-    void liveOverviewSnapshotDoesNotReplaceProviderHistory() {
+    void ignoresNonGoldRushSnapshotsAlreadyInStorage() {
         PortfolioHistoryService service = new PortfolioHistoryService(
                 new ChainCatalogService(),
                 repository,
-                List.of(request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of())),
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
                 FIXED_CLOCK);
 
-        service.recordLiveSnapshot(List.of("0xabc"), List.of("ethereum"), new BigDecimal("999.00"));
+        PortfolioHistoryService legacyWriter = new PortfolioHistoryService(
+                new ChainCatalogService(),
+                repository,
+                request -> new PortfolioHistoryFetchResult("hyperliquid", values(request.requiredDates(), "999.00", "999.00"), Set.of()),
+                FIXED_CLOCK);
+        legacyWriter.getHistory(List.of("0xabc"), List.of("ethereum"), PortfolioHistoryPeriod.H24);
 
         PortfolioHistoryResult result = service.getHistory(
                 List.of("0xabc"),
@@ -95,49 +97,8 @@ class PortfolioHistoryServiceTest {
 
         assertThat(result.points()).hasSize(2);
         assertThat(result.points()).extracting(PortfolioHistoryResultPoint::source).containsOnly("goldrush");
-        assertThat(result.points().get(1).totalUsd()).isEqualByComparingTo("110.00");
-    }
-
-    @Test
-    void liveOverviewSnapshotIsNotReturnedWhenProviderHasNoPointForThatDate() {
-        PortfolioHistoryService service = new PortfolioHistoryService(
-                new ChainCatalogService(),
-                repository,
-                List.of(request -> new PortfolioHistoryFetchResult("goldrush", firstDateOnly(request.requiredDates(), "100.00"), Set.of())),
-                FIXED_CLOCK);
-
-        service.recordLiveSnapshot(List.of("0xabc"), List.of("ethereum"), new BigDecimal("999.00"));
-
-        PortfolioHistoryResult result = service.getHistory(
-                List.of("0xabc"),
-                List.of("ethereum"),
-                PortfolioHistoryPeriod.H24);
-
-        assertThat(result.points()).hasSize(1);
-        assertThat(result.points().get(0).source()).isEqualTo("goldrush");
         assertThat(result.points().get(0).totalUsd()).isEqualByComparingTo("100.00");
-    }
-
-    @Test
-    void liveOverviewSnapshotDoesNotOverwriteStoredProviderSnapshot() {
-        PortfolioHistoryService service = new PortfolioHistoryService(
-                new ChainCatalogService(),
-                repository,
-                List.of(request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of())),
-                FIXED_CLOCK);
-
-        service.getHistory(
-                List.of("0xabc"),
-                List.of("ethereum"),
-                PortfolioHistoryPeriod.H24);
-
-        service.recordLiveSnapshot(List.of("0xabc"), List.of("ethereum"), new BigDecimal("999.00"));
-
-        PortfolioHistorySnapshot todaySnapshot = repository.snapshots().stream()
-                .max(java.util.Comparator.comparing(PortfolioHistorySnapshot::localDate))
-                .orElseThrow();
-        assertThat(todaySnapshot.source()).isEqualTo("goldrush");
-        assertThat(todaySnapshot.totalUsd()).isEqualByComparingTo("110.00");
+        assertThat(result.points().get(1).totalUsd()).isEqualByComparingTo("110.00");
     }
 
     private Map<LocalDate, BigDecimal> values(Set<LocalDate> requiredDates, String first, String second) {
@@ -145,13 +106,6 @@ class PortfolioHistoryServiceTest {
         Map<LocalDate, BigDecimal> values = new LinkedHashMap<>();
         values.put(orderedDates.get(0), new BigDecimal(first));
         values.put(orderedDates.get(1), new BigDecimal(second));
-        return values;
-    }
-
-    private Map<LocalDate, BigDecimal> firstDateOnly(Set<LocalDate> requiredDates, String first) {
-        List<LocalDate> orderedDates = requiredDates.stream().sorted().toList();
-        Map<LocalDate, BigDecimal> values = new LinkedHashMap<>();
-        values.put(orderedDates.get(0), new BigDecimal(first));
         return values;
     }
 

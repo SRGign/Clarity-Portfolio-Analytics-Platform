@@ -2,24 +2,18 @@ package com.pnltracker.analytics;
 
 import com.pnltracker.defi.model.DefiPosition;
 import com.pnltracker.domain.AssetBalance;
-import com.pnltracker.domain.ChainDefinition;
 import com.pnltracker.domain.PortfolioAnalysis;
-import com.pnltracker.service.ChainCatalogService;
-import com.pnltracker.service.GoldRushPortfolioHistoryProvider;
-import com.pnltracker.service.PortfolioHistoryFetchRequest;
-import com.pnltracker.service.PortfolioHistoryFetchResult;
 import com.pnltracker.service.PortfolioHistoryPeriod;
+import com.pnltracker.service.PortfolioHistoryResultPoint;
+import com.pnltracker.service.PortfolioHistoryService;
 import com.pnltracker.service.PortfolioOverviewService;
 import com.pnltracker.service.StablecoinSymbols;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.Comparator;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 @Service
 public class PortfolioMetricsCalculator {
@@ -29,46 +23,51 @@ public class PortfolioMetricsCalculator {
     private static final int MIN_HISTORY_POINTS = 14;
 
     private final PortfolioOverviewService portfolioOverviewService;
-    private final GoldRushPortfolioHistoryProvider goldRushPortfolioHistoryProvider;
-    private final ChainCatalogService chainCatalogService;
+    private final PortfolioHistoryService portfolioHistoryService;
 
     public PortfolioMetricsCalculator(
             PortfolioOverviewService portfolioOverviewService,
-            GoldRushPortfolioHistoryProvider goldRushPortfolioHistoryProvider,
-            ChainCatalogService chainCatalogService) {
+            PortfolioHistoryService portfolioHistoryService) {
         this.portfolioOverviewService = portfolioOverviewService;
-        this.goldRushPortfolioHistoryProvider = goldRushPortfolioHistoryProvider;
-        this.chainCatalogService = chainCatalogService;
+        this.portfolioHistoryService = portfolioHistoryService;
     }
 
     public PortfolioMetrics calculate(List<String> addresses, List<String> chains) {
         PortfolioAnalysis overview = portfolioOverviewService.getOverview(addresses, chains);
         double totalUsd = amount(overview.summary().totalUsd());
         AssetBalance largest = overview.assets().stream()
+                .filter(asset -> !StablecoinSymbols.isStable(asset.symbol()))
                 .max(Comparator.comparing(AssetBalance::valueUsd))
                 .orElse(null);
         double largestUsd = largest == null ? 0.0d : amount(largest.valueUsd());
         double concentrationPct = pct(largestUsd, totalUsd);
 
-        double stableUsd = overview.assets().stream()
+        double spotStableUsd = overview.assets().stream()
                 .filter(asset -> StablecoinSymbols.isStable(asset.symbol()))
                 .map(AssetBalance::valueUsd)
                 .mapToDouble(this::amount)
                 .sum();
-        double stableInDefiUsd = overview.defiPositions().stream()
+        double deployedStableUsd = overview.defiPositions().stream()
                 .filter(position -> StablecoinSymbols.isStable(position.underlyingSymbol()))
                 .map(DefiPosition::grossSupplyUsd)
                 .mapToDouble(this::amount)
                 .sum();
+        double deployedStableAlreadyCountedUsd = overview.defiPositions().stream()
+                .filter(DefiPosition::alreadyCountedInPortfolio)
+                .filter(position -> StablecoinSymbols.isStable(position.underlyingSymbol()))
+                .map(DefiPosition::grossSupplyUsd)
+                .mapToDouble(this::amount)
+                .sum();
+        double stableUsd = spotStableUsd + Math.max(deployedStableUsd - deployedStableAlreadyCountedUsd, 0.0d);
         double defiExposureUsd = overview.defiPositions().stream()
                 .map(this::exposureUsd)
                 .filter(value -> value != null)
                 .mapToDouble(this::amount)
                 .sum();
         double defiNetUsd = amount(overview.defiSummary().visibleNetUsd());
-        double idleStableUsd = Math.max(stableUsd - stableInDefiUsd, 0.0d);
+        double idleStableUsd = Math.max(spotStableUsd - deployedStableAlreadyCountedUsd, 0.0d);
 
-        List<HistoryValue> values = goldRushValues(addresses, chains);
+        List<HistoryValue> values = historyValues(addresses, chains);
         TimeSeriesMetrics timeSeries = values.size() < MIN_HISTORY_POINTS
                 ? TimeSeriesMetrics.empty(values)
                 : calculateTimeSeries(values);
@@ -81,6 +80,7 @@ public class PortfolioMetricsCalculator {
                 concentrationRisk(concentrationPct),
                 pct(stableUsd, totalUsd),
                 stableUsd,
+                deployedStableUsd,
                 pct(defiExposureUsd, totalUsd),
                 defiExposureUsd,
                 defiNetUsd,
@@ -102,30 +102,10 @@ public class PortfolioMetricsCalculator {
                 timeSeries.historyDaysAvailable());
     }
 
-    private List<HistoryValue> goldRushValues(List<String> addresses, List<String> chains) {
-        LocalDate today = LocalDate.now(ZoneOffset.UTC);
-        Set<LocalDate> requiredDates = new LinkedHashSet<>();
-        for (LocalDate date = today.minusDays(PortfolioHistoryPeriod.D30.lookbackDays() - 1L);
-                !date.isAfter(today);
-                date = date.plusDays(1)) {
-            requiredDates.add(date);
-        }
-
-        List<String> normalizedAddresses = addresses.stream()
-                .map(String::trim)
-                .filter(address -> !address.isBlank())
-                .distinct()
-                .toList();
-        List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains);
-        PortfolioHistoryFetchResult result = goldRushPortfolioHistoryProvider.fetchHistory(new PortfolioHistoryFetchRequest(
-                normalizedAddresses,
-                resolvedChains,
-                requiredDates,
-                PortfolioHistoryPeriod.D30));
-
-        return result.totalsByDate().entrySet().stream()
-                .sorted(java.util.Map.Entry.comparingByKey())
-                .map(entry -> new HistoryValue(entry.getKey(), amount(entry.getValue())))
+    private List<HistoryValue> historyValues(List<String> addresses, List<String> chains) {
+        return portfolioHistoryService.getHistory(addresses, chains, PortfolioHistoryPeriod.D30).points().stream()
+                .sorted(Comparator.comparing(PortfolioHistoryResultPoint::localDate))
+                .map(point -> new HistoryValue(point.localDate(), amount(point.totalUsd())))
                 .toList();
     }
 

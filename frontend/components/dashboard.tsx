@@ -25,6 +25,12 @@ import {
   walletSetHash,
 } from "@/lib/portfolio";
 import {
+  clearSessionCache,
+  readSessionCache,
+  scopedSessionCacheKey,
+  writeSessionCache,
+} from "@/lib/session-cache";
+import {
   getMeta,
   listWallets,
   removeWallet,
@@ -52,6 +58,8 @@ const SELECTED_CHAINS_CATALOG_KEY = "selected-chains-catalog";
 const SWATCHES = ["#2f78d1", "#6d7fe7", "#5975db", "#f07a2c", "#bfdc3c", "#7ec8d8", "#12a7a1", "#a6a0dd"];
 const OTHER_SWATCH = "#5d6674";
 const MAX_ALLOCATION_SLICES = 6;
+const PORTFOLIO_METRICS_CACHE_PREFIX = "portfolio-risk-metrics-v1";
+const PORTFOLIO_METRICS_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
   totalValueUsd: 0,
   protocolExposureUsd: 0,
@@ -60,21 +68,13 @@ const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
   protocolPositionCounts: {},
   walletValues: {},
   chainValues: {},
+  tokenValues: {},
   loading: false,
 };
 
 type AllocationMode = "token" | "chain" | "wallet";
 type AllocationView = "strip" | "ring";
 type MainView = "dashboard" | "risk-engine";
-
-type ActivityItem = {
-  id: string;
-  kind: string;
-  title: string;
-  detail: string;
-  timestamp: string;
-  valueUsd: number | null;
-};
 
 type ChartPoint = {
   label: string;
@@ -85,7 +85,16 @@ type ChartPoint = {
   tooltipContext: string;
 };
 
-type AllocationChartRow = ChainAllocation & {
+type AllocationSourceBreakdown = {
+  label: string;
+  valueUsd: number;
+};
+
+type AllocationInputRow = ChainAllocation & {
+  sourceBreakdown?: AllocationSourceBreakdown[];
+};
+
+type AllocationChartRow = AllocationInputRow & {
   share: number;
   color: string;
   grouped: boolean;
@@ -185,9 +194,14 @@ export function Dashboard() {
 
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
   const selectedChainKey = useMemo(() => selectedChains.slice().sort().join("|"), [selectedChains]);
+  const portfolioMetricsCacheKey = useMemo(
+    () => scopedSessionCacheKey(PORTFOLIO_METRICS_CACHE_PREFIX, [walletHash, selectedChainKey]),
+    [selectedChainKey, walletHash],
+  );
   const baseTotalUsd = summary?.totalUsd ?? 0;
   const totalUsd = baseTotalUsd + solanaDefiTotals.totalValueUsd;
-  const syncValueLoading = wallets.length > 0 && totalUsd === 0 && (refreshing || solanaDefiTotals.loading);
+  const netWorthComputing = wallets.length > 0 && (refreshing || solanaDefiTotals.loading);
+  const syncValueLoading = wallets.length > 0 && totalUsd === 0 && netWorthComputing;
   const chartDelta = useMemo(
     () => computePeriodDelta(history?.points ?? [], totalUsd, period),
     [history?.points, totalUsd, period],
@@ -198,7 +212,7 @@ export function Dashboard() {
   );
   const chartPoints = useMemo(
     () => buildChartPoints(
-      (history?.points ?? []).filter((point) => point.source !== "live-overview"),
+      history?.points ?? [],
       null,
       period,
     ),
@@ -213,14 +227,26 @@ export function Dashboard() {
     [summary?.allocations, solanaDefiTotals.chainValues],
   );
   const assetInventoryRows = useMemo(() => buildAssetInventoryRows(assets), [assets]);
+  const backendDefiTokenValues = useMemo(
+    () => buildBackendDefiTokenValues(defiPositions.length > 0 ? defiPositions : positions),
+    [defiPositions, positions],
+  );
+  const defiTokenValues = useMemo(
+    () => mergeValueMaps(backendDefiTokenValues, solanaDefiTotals.tokenValues),
+    [backendDefiTokenValues, solanaDefiTotals.tokenValues],
+  );
+  const tokenAllocationRows = useMemo(
+    () => buildTokenAllocationRows(assets, defiTokenValues),
+    [assets, defiTokenValues],
+  );
   const allocationRows = useMemo(
     () =>
       allocationMode === "token"
-        ? groupAllocationsByToken(assets)
+        ? tokenAllocationRows
         : allocationMode === "wallet"
           ? walletAllocationRows
           : chainAllocationRows,
-    [allocationMode, assets, chainAllocationRows, walletAllocationRows],
+    [allocationMode, chainAllocationRows, tokenAllocationRows, walletAllocationRows],
   );
   const allocationChartRows = useMemo(
     () => buildAllocationChartRows(allocationRows, totalUsd),
@@ -231,18 +257,9 @@ export function Dashboard() {
       allocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? allocationChartRows[0] ?? null,
     [allocationChartRows, hoveredAllocationKey],
   );
-  const summaryAllocationRows = useMemo(
-    () =>
-      allocationMode === "token"
-        ? groupAllocationsByToken(assets)
-        : allocationMode === "wallet"
-          ? buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets, {})
-          : (summary?.allocations ?? []),
-    [allocationMode, assets, summary?.walletAllocations, summary?.allocations, wallets],
-  );
   const summaryAllocationChartRows = useMemo(
-    () => buildAllocationChartRows(summaryAllocationRows, baseTotalUsd),
-    [summaryAllocationRows, baseTotalUsd],
+    () => buildAllocationChartRows(allocationRows, totalUsd),
+    [allocationRows, totalUsd],
   );
   const summaryActiveAllocationRow = useMemo(
     () =>
@@ -250,10 +267,6 @@ export function Dashboard() {
     [summaryAllocationChartRows, hoveredAllocationKey],
   );
   const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
-  const activity = useMemo(
-    () => buildActivity(wallets, history?.points ?? [], lastRefresh, wallets.length > 0 ? totalUsd : null),
-    [wallets, history?.points, lastRefresh, totalUsd],
-  );
   const activeDefiPositions = useMemo(
     () => (defiPositions.length > 0 ? defiPositions : positions),
     [defiPositions, positions],
@@ -295,6 +308,11 @@ export function Dashboard() {
       setDefiPositions(data.defiPositions);
       setPositionSummary(data.positionSummary ?? null);
       setDefiSummary(data.defiSummary ?? null);
+      if (manual) {
+        clearSessionCache(portfolioMetricsCacheKey);
+        setPortfolioMetrics(null);
+        setMetricsPartial(false);
+      }
 
       const refreshTime = new Date().toISOString();
       setLastRefresh(refreshTime);
@@ -420,6 +438,17 @@ export function Dashboard() {
     }
 
     let active = true;
+    const cachedMetrics = readSessionCache<PortfolioMetricsResponse>(
+      portfolioMetricsCacheKey,
+      PORTFOLIO_METRICS_CACHE_TTL_MS,
+    );
+    if (cachedMetrics) {
+      setPortfolioMetrics(cachedMetrics);
+      setMetricsPartial(false);
+      setMetricsLoading(false);
+      return;
+    }
+
     setMetricsLoading(true);
     setMetricsPartial(false);
 
@@ -427,6 +456,7 @@ export function Dashboard() {
       .then((response) => {
         if (active) {
           setPortfolioMetrics(response);
+          writeSessionCache(portfolioMetricsCacheKey, response);
         }
       })
       .catch(() => {
@@ -444,7 +474,7 @@ export function Dashboard() {
     return () => {
       active = false;
     };
-  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains]);
+  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains, portfolioMetricsCacheKey]);
 
   useEffect(() => {
     if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
@@ -523,7 +553,7 @@ export function Dashboard() {
     );
   }
 
-  const topNetwork = summary?.allocations[0]?.displayName ?? "—";
+  const topNetwork = chainAllocationRows[0]?.displayName ?? "—";
   const topWallet = walletAllocationRows[0]?.displayName ?? "—";
   const scopeLabel =
     chains.length === 0
@@ -735,7 +765,11 @@ export function Dashboard() {
               <p className="s-kicker">TOTAL NET WORTH</p>
               <div className="s-hero-row">
                 <h1 className="s-hero-value">
-                  {syncValueLoading ? <SyncValueLoader label="SYNCING VALUE" /> : formatCurrency(totalUsd)}
+                  {syncValueLoading ? (
+                    <SyncValueLoader label="SYNCING VALUE" />
+                  ) : (
+                    <NetWorthValue value={totalUsd} loading={netWorthComputing} />
+                  )}
                 </h1>
                 {heroDelta.amount !== null && (
                   <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
@@ -824,7 +858,12 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-body">
-                    <Chart points={chartPoints} benchmarks={benchmarks} visibleBenchmarks={visibleBenchmarks} />
+                    <Chart
+                      points={chartPoints}
+                      benchmarks={benchmarks}
+                      visibleBenchmarks={visibleBenchmarks}
+                      loading={historyLoading}
+                    />
                   </div>
                 </div>
 
@@ -853,9 +892,13 @@ export function Dashboard() {
                   <div className="s-panel-body">
                     {overviewAllocationView === "ring" ? (
                       <div className="s-ring-layout">
-                        <div>
+                        <div className="s-ring-total">
                           <div className="s-mega">
-                            {syncValueLoading ? <SyncValueLoader label="SYNCING VALUE" compact /> : formatCurrency(baseTotalUsd)}
+                            {syncValueLoading ? (
+                              <SyncValueLoader label="SYNCING VALUE" compact />
+                            ) : (
+                              <NetWorthValue value={totalUsd} loading={netWorthComputing} compact />
+                            )}
                           </div>
                           <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
                             {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
@@ -1048,41 +1091,6 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                {/* Ledger Activity */}
-                <div className="s-panel">
-                  <div className="s-panel-hd">
-                    <span>LEDGER ACTIVITY</span>
-                    <span className="s-badge">{activity.length} EVENTS</span>
-                  </div>
-                  <div className="s-table-shell">
-                    <table className="s-table s-table-compact">
-                      <thead>
-                        <tr>
-                          <th>EVENT</th>
-                          <th>DETAIL</th>
-                          <th className="align-right">VALUE</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activity.map((item) => (
-                          <tr key={item.id}>
-                            <td data-label="Event">
-                              <div className="s-asset-cell">
-                                <strong>{item.kind}</strong>
-                                <span>{item.title}</span>
-                              </div>
-                            </td>
-                            <td data-label="Detail" className="s-muted">{item.detail}</td>
-                            <td data-label="Value" className={`align-right mono ${toneClass(item.valueUsd)}`}>
-                              {item.valueUsd === null ? "N/A" : formatCurrency(item.valueUsd)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
               </div>{/* end s-col-side */}
             </div>{/* end s-grid */}
           </>
@@ -1146,10 +1154,11 @@ function NetworkBreakdownTag({ asset }: { asset: AssetInventoryRow }) {
   );
 }
 
-function Chart({ points, benchmarks, visibleBenchmarks }: {
+function Chart({ points, benchmarks, visibleBenchmarks, loading }: {
   points: ChartPoint[];
   benchmarks: BenchmarkData | null;
   visibleBenchmarks: { bitcoin: boolean; solana: boolean };
+  loading: boolean;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{
@@ -1160,6 +1169,14 @@ function Chart({ points, benchmarks, visibleBenchmarks }: {
     width: number;
     height: number;
   } | null>(null);
+
+  if (points.length === 0 && loading) {
+    return (
+      <div className="chart-empty chart-loading">
+        <SyncValueLoader label="SYNCING DAILY CHECKPOINTS" compact />
+      </div>
+    );
+  }
 
   if (points.length === 0) {
     return <div className="chart-empty"><strong>No history in scope</strong><p>Refresh to hydrate the first server-side baseline.</p></div>;
@@ -1492,6 +1509,15 @@ function AllocationDonutChart({
           <strong>{activeRow?.displayName ?? "Waiting"}</strong>
           <div className="allocation-center-value">{activeRow ? formatCurrency(activeRow.valueUsd) : "No data"}</div>
           <span className="allocation-center-share">{activeRow ? formatShare(activeRow.share) : "0.00%"}</span>
+          {activeRow?.sourceBreakdown && activeRow.sourceBreakdown.length > 1 ? (
+            <div className="allocation-center-sources">
+              {activeRow.sourceBreakdown.map((source) => (
+                <span key={source.label}>
+                  {source.label.replace(" balance", "")} {formatCurrency(source.valueUsd)}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1570,6 +1596,32 @@ function SyncValueLoader({ label, compact = false }: { label: string; compact?: 
   );
 }
 
+function NetWorthValue({
+  value,
+  loading,
+  compact = false,
+}: {
+  value: number;
+  loading: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <span className={`s-net-worth-value ${compact ? "is-compact" : ""}`}>
+      <span className="s-net-worth-amount">{formatCurrency(value)}</span>
+      {loading ? <NetWorthProgressPill label="CALCULATING" /> : null}
+    </span>
+  );
+}
+
+function NetWorthProgressPill({ label }: { label: string }) {
+  return (
+    <span className="s-net-worth-pending" role="status" aria-live="polite">
+      <span className="s-net-worth-pulse" aria-hidden="true" />
+      <span>{label}</span>
+    </span>
+  );
+}
+
 function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUsd: number | null, period: Period): ChartPoint[] {
   let points = historyPoints
     .slice()
@@ -1609,7 +1661,7 @@ function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUs
   return points;
 }
 
-function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): AllocationChartRow[] {
+function buildAllocationChartRows(rows: AllocationInputRow[], totalUsd: number): AllocationChartRow[] {
   if (totalUsd <= 0) {
     return [];
   }
@@ -1649,6 +1701,100 @@ function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): Al
       groupedCount: groupedRows.length,
     },
   ];
+}
+
+function buildTokenAllocationRows(
+  assets: AssetRow[],
+  defiTokenValues: Record<string, number>,
+): AllocationInputRow[] {
+  const rows = new Map<string, AllocationInputRow>();
+
+  for (const row of groupAllocationsByToken(assets)) {
+    const key = canonicalTokenAllocationKey(row.displayName || row.network);
+    rows.set(key, {
+      network: key,
+      displayName: row.displayName,
+      valueUsd: row.valueUsd,
+      sourceBreakdown: row.valueUsd > 0 ? [{ label: "Spot balance", valueUsd: row.valueUsd }] : [],
+    });
+  }
+
+  for (const [symbol, valueUsd] of Object.entries(defiTokenValues)) {
+    if (valueUsd <= 0) {
+      continue;
+    }
+
+    const key = canonicalTokenAllocationKey(symbol);
+    const existing = rows.get(key);
+    if (existing) {
+      rows.set(key, {
+        ...existing,
+        valueUsd: existing.valueUsd + valueUsd,
+        sourceBreakdown: mergeAllocationSources(existing.sourceBreakdown, "DeFi positions", valueUsd),
+      });
+      continue;
+    }
+
+    rows.set(key, {
+      network: key,
+      displayName: key,
+      valueUsd,
+      sourceBreakdown: [{ label: "DeFi positions", valueUsd }],
+    });
+  }
+
+  return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function buildBackendDefiTokenValues(
+  positions: Array<Pick<LendingPositionResponse, "underlyingSymbol" | "netUsd" | "alreadyCountedInPortfolio">>,
+): Record<string, number> {
+  return positions.reduce<Record<string, number>>((values, position) => {
+    if (position.alreadyCountedInPortfolio) {
+      return values;
+    }
+
+    const valueUsd = position.netUsd ?? 0;
+    if (valueUsd <= 0) {
+      return values;
+    }
+
+    const symbol = canonicalTokenAllocationKey(position.underlyingSymbol);
+    values[symbol] = (values[symbol] ?? 0) + valueUsd;
+    return values;
+  }, {});
+}
+
+function mergeValueMaps(...maps: Array<Record<string, number>>): Record<string, number> {
+  return maps.reduce<Record<string, number>>((merged, map) => {
+    for (const [rawKey, valueUsd] of Object.entries(map)) {
+      const key = canonicalTokenAllocationKey(rawKey);
+      merged[key] = (merged[key] ?? 0) + valueUsd;
+    }
+    return merged;
+  }, {});
+}
+
+function mergeAllocationSources(
+  sources: AllocationSourceBreakdown[] | undefined,
+  label: string,
+  valueUsd: number,
+): AllocationSourceBreakdown[] {
+  const next = [...(sources ?? [])];
+  const existing = next.find((source) => source.label === label);
+  if (existing) {
+    existing.valueUsd += valueUsd;
+  } else {
+    next.push({ label, valueUsd });
+  }
+  return next.filter((source) => source.valueUsd > 0);
+}
+
+function canonicalTokenAllocationKey(value: string): string {
+  const symbol = value.trim().toUpperCase();
+  if (symbol === "USDC.E") return "USDC";
+  if (symbol === "WETH") return "ETH";
+  return symbol || "UNKNOWN";
 }
 
 function buildAssetInventoryRows(assets: AssetRow[]): AssetInventoryRow[] {
@@ -1907,50 +2053,6 @@ function allocationRowKey(row: Pick<AllocationChartRow, "network" | "displayName
   }
 
   return `${row.network}::${row.displayName}`;
-}
-
-function buildActivity(
-  wallets: WalletRecord[],
-  historyPoints: PortfolioHistoryPoint[],
-  lastRefresh: string | null,
-  totalUsd: number | null,
-): ActivityItem[] {
-  const items: ActivityItem[] = [];
-
-  if (lastRefresh) {
-    items.push({
-      id: `refresh-${lastRefresh}`,
-      kind: "SYNC",
-      title: "Live portfolio refresh completed",
-      detail: "Composite portfolio overview fetched from providers",
-      timestamp: lastRefresh,
-      valueUsd: totalUsd,
-    });
-  }
-
-  for (const wallet of wallets) {
-    items.push({
-      id: `wallet-${wallet.normalizedAddress}`,
-      kind: "WALLET",
-      title: "Wallet registered into local watch set",
-      detail: wallet.label || shortAddress(wallet.originalInput),
-      timestamp: wallet.createdAt,
-      valueUsd: null,
-    });
-  }
-
-  for (const point of historyPoints.slice(-8)) {
-    items.push({
-      id: `snapshot-${point.localDate}`,
-      kind: "HISTORY",
-      title: "Server checkpoint available",
-      detail: `${point.localDate} / ${point.source}`,
-      timestamp: point.localDate,
-      valueUsd: point.totalUsd,
-    });
-  }
-
-  return items.sort((left, right) => right.timestamp.localeCompare(left.timestamp)).slice(0, 10);
 }
 
 type ProtocolGroup = {
