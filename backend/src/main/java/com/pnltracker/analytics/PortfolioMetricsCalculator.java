@@ -8,12 +8,17 @@ import com.pnltracker.service.PortfolioHistoryResultPoint;
 import com.pnltracker.service.PortfolioHistoryService;
 import com.pnltracker.service.PortfolioOverviewService;
 import com.pnltracker.service.StablecoinSymbols;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 @Service
 public class PortfolioMetricsCalculator {
@@ -21,15 +26,46 @@ public class PortfolioMetricsCalculator {
     private static final double ANNUAL_RISK_FREE_RATE = 0.05d;
     private static final double TRADING_DAYS_PER_YEAR = 252.0d;
     private static final int MIN_HISTORY_POINTS = 14;
+    private static final Set<String> CORE_MAJOR_SYMBOLS = Set.of(
+            "BTC",
+            "WBTC",
+            "CBBTC",
+            "TBTC",
+            "RENBTC",
+            "XBT",
+            "ETH",
+            "WETH",
+            "WETHE",
+            "STETH",
+            "WSTETH",
+            "RETH",
+            "CBETH",
+            "FRXETH",
+            "SFRXETH",
+            "METH",
+            "WEETH",
+            "EZETH",
+            "OSETH",
+            "SWETH");
 
     private final PortfolioOverviewService portfolioOverviewService;
     private final PortfolioHistoryService portfolioHistoryService;
+    private final Clock clock;
 
+    @Autowired
     public PortfolioMetricsCalculator(
             PortfolioOverviewService portfolioOverviewService,
             PortfolioHistoryService portfolioHistoryService) {
+        this(portfolioOverviewService, portfolioHistoryService, Clock.systemUTC());
+    }
+
+    PortfolioMetricsCalculator(
+            PortfolioOverviewService portfolioOverviewService,
+            PortfolioHistoryService portfolioHistoryService,
+            Clock clock) {
         this.portfolioOverviewService = portfolioOverviewService;
         this.portfolioHistoryService = portfolioHistoryService;
+        this.clock = clock;
     }
 
     public PortfolioMetrics calculate(List<String> addresses, List<String> chains) {
@@ -77,7 +113,7 @@ public class PortfolioMetricsCalculator {
                 concentrationPct,
                 largestUsd,
                 largest == null ? "N/A" : largest.symbol(),
-                concentrationRisk(concentrationPct),
+                concentrationRisk(largest == null ? null : largest.symbol(), concentrationPct),
                 pct(stableUsd, totalUsd),
                 stableUsd,
                 deployedStableUsd,
@@ -103,8 +139,10 @@ public class PortfolioMetricsCalculator {
     }
 
     private List<HistoryValue> historyValues(List<String> addresses, List<String> chains) {
+        LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
         return portfolioHistoryService.getHistory(addresses, chains, PortfolioHistoryPeriod.D30).points().stream()
                 .sorted(Comparator.comparing(PortfolioHistoryResultPoint::localDate))
+                .filter(point -> point.localDate().isBefore(today))
                 .map(point -> new HistoryValue(point.localDate(), amount(point.totalUsd())))
                 .toList();
     }
@@ -193,7 +231,16 @@ public class PortfolioMetricsCalculator {
                 troughUsd);
     }
 
-    private String concentrationRisk(double concentrationPct) {
+    private String concentrationRisk(String symbol, double concentrationPct) {
+        if (isCoreMajorAsset(symbol)) {
+            if (concentrationPct >= 80.0d) {
+                return "HIGH";
+            }
+            if (concentrationPct >= 65.0d) {
+                return "MEDIUM";
+            }
+            return "LOW";
+        }
         if (concentrationPct > 50.0d) {
             return "CRITICAL";
         }
@@ -204,6 +251,13 @@ public class PortfolioMetricsCalculator {
             return "MEDIUM";
         }
         return "LOW";
+    }
+
+    private boolean isCoreMajorAsset(String symbol) {
+        String normalized = symbol == null
+                ? ""
+                : symbol.trim().toUpperCase(Locale.US).replaceAll("[^A-Z0-9]", "");
+        return CORE_MAJOR_SYMBOLS.contains(normalized);
     }
 
     private double mean(List<Double> values) {

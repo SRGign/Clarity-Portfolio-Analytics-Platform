@@ -142,17 +142,17 @@ export function RiskEngineView({
     ? `${historyPoints.length}D HISTORY`
     : syncing
       ? "SYNCING"
-      : "HISTORY BUILDING";
+      : "WAITING";
 
   return (
     <section className="s-risk-page">
       <header className="s-risk-hero">
         <div className="s-risk-hero-copy">
           <p className="s-kicker">RISK ENGINE</p>
-          <h2>Risk metrics command center</h2>
+          <h2>Portfolio risk overview</h2>
           <p>
-            Deterministic portfolio risk from concentration, stables, protocol exposure, 30D returns,
-            benchmark beta, tail loss, and stress scenarios.
+            Deterministic risk checks for concentration, liquidity, DeFi exposure, 30D returns,
+            benchmark beta, tail loss, and stress tests.
           </p>
         </div>
         <div className={`s-risk-command-card is-${posture.tone}`}>
@@ -167,7 +167,7 @@ export function RiskEngineView({
         <StatusCell label="Scope" value={`${wallets.length} wallets`} detail={`${chains.length} chains selected`} />
         <StatusCell label="Sample" value={historyLabel} detail={`${returns.length} daily returns`} />
         <StatusCell label="Inputs" value={partialInputs ? "PARTIAL" : syncing ? "SYNCING" : "LIVE"} detail={inputDetail(partialInputs, syncing)} />
-        <StatusCell label="DeFi Surface" value={formatPct(protocolExposurePct)} detail={`${formatCurrency(protocolExposureUsd)} / ${positionCount} positions`} />
+        <StatusCell label="DeFi Exposure" value={formatPct(protocolExposurePct)} detail={`${formatCurrency(protocolExposureUsd)} / ${positionCount} positions`} />
         <StatusAction
           label="Refresh"
           value={refreshing ? "SYNCING..." : "SYNC LIVE"}
@@ -179,23 +179,23 @@ export function RiskEngineView({
 
       {partialInputs ? (
         <div className="s-risk-notice">
-          <strong>Partial live inputs.</strong>
-          <p>Available modules stay visible while missing market or history inputs are rebuilding.</p>
+          <strong>Some inputs are still loading.</strong>
+          <p>Available modules stay visible and update as market or history data arrives.</p>
         </div>
       ) : null}
 
       <div className="s-risk-kpi-grid">
-        <RiskKpi label="Portfolio Value" value={formatCurrency(totalUsd)} detail="Current analysis base" tone="muted" />
+        <RiskKpi label="Portfolio Value" value={formatCurrency(totalUsd)} detail="Current portfolio value" tone="muted" />
         <RiskKpi
           label="1D VaR 95"
           value={tailRisk.varLossUsd == null ? "ACCUMULATING" : formatCurrency(tailRisk.varLossUsd)}
-          detail={tailRisk.varReturn == null ? "History sample still building" : `${formatReturnPct(tailRisk.varReturn)} threshold`}
+          detail={tailRisk.varReturn == null ? "Waiting for more history" : `${formatReturnPct(tailRisk.varReturn)} one-day threshold`}
           tone={tailRiskTone(tailRisk.varReturn)}
         />
         <RiskKpi
           label="Expected Shortfall"
           value={tailRisk.expectedShortfallLossUsd == null ? "ACCUMULATING" : formatCurrency(tailRisk.expectedShortfallLossUsd)}
-          detail={tailRisk.expectedShortfallReturn == null ? "Tail sample still building" : `${formatReturnPct(tailRisk.expectedShortfallReturn)} average tail day`}
+          detail={tailRisk.expectedShortfallReturn == null ? "Waiting for tail history" : `${formatReturnPct(tailRisk.expectedShortfallReturn)} average tail loss`}
           tone={tailRiskTone(tailRisk.expectedShortfallReturn)}
         />
         <RiskKpi
@@ -223,36 +223,36 @@ export function RiskEngineView({
               label="Concentration"
               value={metrics ? `${metrics.concentrationAsset} ${formatPct(metrics.concentrationPct)}` : "PARTIAL"}
               tone={riskTone(metrics?.concentrationRisk)}
-              meaning={metrics ? concentrationMeaning(metrics.concentrationRisk) : "Concentration module is waiting for asset-level metrics."}
-              inputs={metrics ? `${formatCurrency(metrics.concentrationUsd)} largest asset / ${formatCurrency(totalUsd)} portfolio` : `${formatCurrency(totalUsd)} portfolio base available`}
+              meaning={metrics ? concentrationMeaning(metrics.concentrationRisk) : "Waiting for asset-level balances."}
+              inputs={metrics ? `${formatCurrency(metrics.concentrationUsd)} largest asset / ${formatCurrency(totalUsd)} portfolio` : `${formatCurrency(totalUsd)} current portfolio value`}
             />
             <RiskRow
               label="Stablecoin Buffer"
               value={metrics ? formatPct(metrics.stableAllocationPct) : "PARTIAL"}
               tone={metrics ? stableTone(metrics.stableAllocationPct) : "muted"}
-              meaning={metrics ? stableMeaning(metrics.stableAllocationPct) : "Stable allocation is not ready yet."}
-              inputs={metrics ? `${formatCurrency(metrics.stableUsd)} stable exposure, ${formatCurrency(metrics.idleStableUsd)} idle` : "Stable module pending"}
+              meaning={metrics ? stableMeaning(metrics.stableAllocationPct) : "Waiting for stablecoin totals."}
+              inputs={metrics ? `${formatCurrency(metrics.stableUsd)} in stables, ${formatCurrency(metrics.idleStableUsd)} idle` : "Stablecoin totals pending"}
             />
             <RiskRow
               label="DeFi Exposure"
               value={formatPct(protocolExposurePct)}
               tone={protocolTone(protocolExposurePct)}
-              meaning="Protocol risk surface across vaults, lending, staking, LPs, and reward wrappers."
-              inputs={`${formatCurrency(protocolExposureUsd)} protocol value, ${positionCount} positions`}
+              meaning="Capital currently inside DeFi positions such as lending, vaults, LPs, or staking wrappers."
+              inputs={`${formatCurrency(protocolExposureUsd)} in DeFi, ${positionCount} positions`}
             />
             <RiskRow
               label="Sharpe 30D"
               value={metricNumber(metrics?.sharpe30d)}
               tone={ratioTone(metrics?.sharpe30d)}
               meaning="Return earned per unit of daily volatility."
-              inputs={metrics ? `${formatNullablePct(metrics.averageDailyReturnPct30d)} avg daily return, ${formatNullablePct(metrics.dailyVolatilityPct30d)} daily volatility` : `${returns.length} return observations`}
+              inputs={metrics ? `${formatNullablePct(metrics.averageDailyReturnPct30d)} average daily return, ${formatNullablePct(metrics.dailyVolatilityPct30d)} daily volatility` : `${returns.length} daily returns`}
             />
             <RiskRow
               label="Sortino 30D"
               value={metricNumber(metrics?.sortino30d)}
               tone={ratioTone(metrics?.sortino30d)}
-              meaning="Return quality after penalising downside days only."
-              inputs={metrics ? `${formatNullablePct(metrics.downsideDeviationPct30d)} downside deviation` : "Downside sample pending"}
+              meaning="Return quality after counting downside volatility only."
+              inputs={metrics ? `${formatNullablePct(metrics.downsideDeviationPct30d)} downside deviation` : "Waiting for downside history"}
             />
             <RiskRow
               label="Max Drawdown 30D"
@@ -266,18 +266,18 @@ export function RiskEngineView({
 
         <section className="s-panel s-risk-panel">
           <div className="s-panel-hd">
-            <span>TAIL RISK TAPE</span>
+            <span>TAIL RISK</span>
             <span className="s-badge">HISTORICAL 30D</span>
           </div>
           <div className="s-risk-tape">
-            <TapeRow label="Worst Day" value={tailRisk.worstReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.worstReturn)} detail={tailRisk.worstLossUsd == null ? "History sample still building" : formatCurrency(tailRisk.worstLossUsd)} tone={tailRiskTone(tailRisk.worstReturn)} />
-            <TapeRow label="VaR 95" value={tailRisk.varReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.varReturn)} detail={tailRisk.varLossUsd == null ? "Threshold pending" : formatCurrency(tailRisk.varLossUsd)} tone={tailRiskTone(tailRisk.varReturn)} />
-            <TapeRow label="Expected Shortfall" value={tailRisk.expectedShortfallReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.expectedShortfallReturn)} detail={tailRisk.expectedShortfallLossUsd == null ? "Tail average pending" : formatCurrency(tailRisk.expectedShortfallLossUsd)} tone={tailRiskTone(tailRisk.expectedShortfallReturn)} />
+            <TapeRow label="Worst Day" value={tailRisk.worstReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.worstReturn)} detail={tailRisk.worstLossUsd == null ? "Waiting for more history" : formatCurrency(tailRisk.worstLossUsd)} tone={tailRiskTone(tailRisk.worstReturn)} />
+            <TapeRow label="VaR 95" value={tailRisk.varReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.varReturn)} detail={tailRisk.varLossUsd == null ? "Waiting for threshold" : formatCurrency(tailRisk.varLossUsd)} tone={tailRiskTone(tailRisk.varReturn)} />
+            <TapeRow label="Expected Shortfall" value={tailRisk.expectedShortfallReturn == null ? "ACCUMULATING" : formatReturnPct(tailRisk.expectedShortfallReturn)} detail={tailRisk.expectedShortfallLossUsd == null ? "Waiting for tail loss" : formatCurrency(tailRisk.expectedShortfallLossUsd)} tone={tailRiskTone(tailRisk.expectedShortfallReturn)} />
             <TapeRow label="Return Sample" value={`${tailRisk.sampleSize}`} detail="Daily observations" tone="muted" />
           </div>
 
           <div className="s-risk-benchmark-block">
-            <span>BENCHMARK FACTOR LOAD</span>
+            <span>BENCHMARK EXPOSURE</span>
             <BenchmarkBar stats={benchmarkStats.bitcoin} />
             <BenchmarkBar stats={benchmarkStats.solana} />
           </div>
@@ -286,7 +286,7 @@ export function RiskEngineView({
 
       <section className="s-panel s-risk-panel">
         <div className="s-panel-hd">
-          <span>IMPLEMENTED RISK MODULES</span>
+          <span>RISK MODULES</span>
           <span className="s-badge">{modules.length} MODULES</span>
         </div>
         <div className="s-risk-module-grid">
@@ -298,7 +298,7 @@ export function RiskEngineView({
 
       <section className="s-panel s-risk-panel">
         <div className="s-panel-hd">
-          <span>SCENARIO STRESS DECK</span>
+          <span>STRESS SCENARIOS</span>
           <span className="s-badge">DETERMINISTIC SHOCKS</span>
         </div>
         <div className="s-risk-scenario-grid">
@@ -464,9 +464,9 @@ function buildRiskModules({
       status: tailRisk.varLossUsd == null ? "BUILDING" : "LIVE",
       value: tailRisk.varLossUsd == null ? "ACCUMULATING" : formatCurrency(tailRisk.varLossUsd),
       detail: tailRisk.varReturn == null
-        ? "Historical loss threshold appears after enough daily portfolio returns."
-        : `95% historical one-day loss threshold is ${formatReturnPct(tailRisk.varReturn)} on the current portfolio base.`,
-      footnote: "Historical VaR, not a guarantee.",
+        ? "Waiting for enough daily returns to estimate one-day loss."
+        : `95% historical one-day loss threshold is ${formatReturnPct(tailRisk.varReturn)} on the current portfolio value.`,
+      footnote: "Historical estimate, not a forecast.",
       tone: tailRiskTone(tailRisk.varReturn),
       rows: [
         ["Confidence", "95%"],
@@ -479,9 +479,9 @@ function buildRiskModules({
       status: tailRisk.expectedShortfallLossUsd == null ? "BUILDING" : "LIVE",
       value: tailRisk.expectedShortfallLossUsd == null ? "ACCUMULATING" : formatCurrency(tailRisk.expectedShortfallLossUsd),
       detail: tailRisk.expectedShortfallReturn == null
-        ? "Tail average appears after the bad-day sample is large enough."
-        : `Average loss inside the VaR tail is ${formatReturnPct(tailRisk.expectedShortfallReturn)}.`,
-      footnote: "Shows tail severity after VaR is breached.",
+        ? "Waiting for enough loss days to estimate tail severity."
+        : `Average day beyond VaR is ${formatReturnPct(tailRisk.expectedShortfallReturn)}.`,
+      footnote: "Average loss after the VaR threshold is crossed.",
       tone: tailRiskTone(tailRisk.expectedShortfallReturn),
       rows: [
         ["Worst day", tailRisk.worstReturn == null ? "N/A" : formatReturnPct(tailRisk.worstReturn)],
@@ -494,9 +494,9 @@ function buildRiskModules({
       status: primaryBenchmark.beta == null ? "BUILDING" : "LIVE",
       value: primaryBenchmark.beta == null ? "ACCUMULATING" : `${primaryBenchmark.label} ${primaryBenchmark.beta.toFixed(2)}`,
       detail: primaryBenchmark.beta == null
-        ? "Benchmark beta appears after portfolio history and benchmark history align."
-        : `Highest current factor load is against ${primaryBenchmark.label}.`,
-      footnote: "Beta above 1.00 means amplified benchmark movement.",
+        ? "Waiting for matched portfolio and benchmark history."
+        : `Strongest current benchmark exposure is ${primaryBenchmark.label}.`,
+      footnote: "Beta above 1.00 means the portfolio moves more than the benchmark.",
       tone: benchmarkTone(benchmarkStats),
       rows: [
         ["BTC beta", benchmarkStats.bitcoin.beta == null ? "N/A" : benchmarkStats.bitcoin.beta.toFixed(2)],
@@ -509,9 +509,9 @@ function buildRiskModules({
       status: primaryBenchmark.correlation == null ? "BUILDING" : "LIVE",
       value: primaryBenchmark.correlation == null ? "ACCUMULATING" : `${primaryBenchmark.label} ${primaryBenchmark.correlation.toFixed(2)}`,
       detail: primaryBenchmark.correlation == null
-        ? "Correlation appears after aligned daily benchmark returns are available."
+        ? "Waiting for matched BTC and SOL history."
         : `Portfolio currently moves closest to ${primaryBenchmark.label}.`,
-      footnote: "Correlation measures direction, not loss size.",
+      footnote: "Correlation tracks direction, not loss size.",
       tone: correlationTone(primaryBenchmark.correlation),
       rows: [
         ["BTC corr", benchmarkStats.bitcoin.correlation == null ? "N/A" : benchmarkStats.bitcoin.correlation.toFixed(2)],
@@ -521,12 +521,12 @@ function buildRiskModules({
     },
     {
       title: "Liquidity Stress",
-      status: protocolExposureUsd > 0 ? "LIVE" : "LOW SURFACE",
+      status: protocolExposureUsd > 0 ? "LIVE" : "NO DEFI",
       value: formatCurrency(protocolExposureUsd),
       detail: protocolExposureUsd > 0
-        ? `${formatPct(protocolExposurePct)} of the portfolio depends on protocol exits, withdrawals, or vault accounting.`
-        : "No material protocol exit surface is visible in the current portfolio.",
-      footnote: "Pool depth and withdrawal queues are not assumed.",
+        ? `${formatPct(protocolExposurePct)} of the portfolio is currently inside DeFi positions.`
+        : "No DeFi positions are detected in the current portfolio.",
+      footnote: "Does not estimate individual pool depth or withdrawal queues.",
       tone: protocolTone(protocolExposurePct),
       rows: [
         ["Protocol value", formatCurrency(protocolExposureUsd)],
@@ -535,31 +535,31 @@ function buildRiskModules({
       ],
     },
     {
-      title: "Stablecoin Risk",
+      title: "Stablecoin Buffer",
       status: metrics ? "LIVE" : "BUILDING",
       value: metrics ? formatPct(metrics.stableAllocationPct) : "ACCUMULATING",
       detail: metrics
-        ? `${formatCurrency(metrics.stableUsd)} sits in stablecoin exposure, with ${formatCurrency(metrics.deployedStableUsd)} deployed in DeFi and ${formatCurrency(metrics.idleStableUsd)} currently idle.`
-        : "Stablecoin exposure appears when portfolio metrics are ready.",
-      footnote: "Issuer and wrapper mapping can refine this further.",
+        ? `${formatCurrency(metrics.stableUsd)} is in stables; ${formatCurrency(metrics.deployedStableUsd)} is deployed in DeFi and ${formatCurrency(metrics.idleStableUsd)} is idle.`
+        : "Waiting for stablecoin totals.",
+      footnote: "High stables are treated as defensive liquidity; idle capital is tracked separately.",
       tone: metrics ? stableTone(metrics.stableAllocationPct) : "muted",
       rows: [
         ["Stable value", metrics ? formatCurrency(metrics.stableUsd) : "N/A"],
         ["Idle stables", metrics ? formatCurrency(metrics.idleStableUsd) : "N/A"],
         ["Deployed stables", metrics ? formatCurrency(metrics.deployedStableUsd) : "N/A"],
-        ["Monthly drag", metrics ? formatCurrency(metrics.monthlyOpportunityCostUsd) : "N/A"],
+        ["Est. monthly yield gap", metrics ? formatCurrency(metrics.monthlyOpportunityCostUsd) : "N/A"],
       ],
     },
     {
       title: "Protocol Concentration",
-      status: topProtocol ? "LIVE" : protocolExposureUsd > 0 ? "PARTIAL" : "LOW SURFACE",
+      status: topProtocol ? "LIVE" : protocolExposureUsd > 0 ? "GROUPING" : "NONE",
       value: topProtocol ? topProtocol.name : protocolExposureUsd > 0 ? formatCurrency(protocolExposureUsd) : "NONE",
       detail: topProtocol
-        ? `${topProtocol.name} is ${formatPct(topProtocol.shareOfProtocolUsd)} of visible protocol exposure.`
+        ? `${topProtocol.name} holds ${formatPct(topProtocol.shareOfProtocolUsd)} of mapped DeFi exposure.`
         : protocolExposureUsd > 0
-          ? "Protocol exposure exists, but per-protocol values are not fully mapped in this view."
-          : "No material protocol concentration is visible.",
-      footnote: "Uses protocol names from current DeFi positions.",
+          ? "DeFi exposure is detected, but protocol grouping is still incomplete."
+          : "No DeFi protocol exposure is detected.",
+      footnote: "Grouped by protocol names from current DeFi positions.",
       tone: topProtocol ? protocolTone(topProtocolPortfolioShare) : protocolTone(protocolExposurePct),
       rows: [
         ["Top protocol", topProtocol?.name ?? "N/A"],
@@ -571,8 +571,8 @@ function buildRiskModules({
       title: "Stress Scenarios",
       status: "LIVE",
       value: largestScenarioLoss(metrics, protocolExposureUsd),
-      detail: "Runs deterministic shocks against current largest asset, protocol surface, and stablecoin base.",
-      footnote: "Scenario assumptions are visible in the stress deck below.",
+      detail: "Applies fixed shocks to the largest asset, DeFi exposure, and stablecoin balance.",
+      footnote: "Scenario assumptions are listed below.",
       tone: "blue",
       rows: [
         ["Largest asset -15%", metrics ? formatCurrency(metrics.concentrationUsd * 0.15) : "N/A"],
@@ -595,28 +595,28 @@ function buildStressScenarios(metrics: PortfolioMetricsResponse | null, totalUsd
     {
       title: "Largest Asset Shock",
       shock: "-15%",
-      detail: metrics ? `${metrics.concentrationAsset} shock against the largest visible position.` : "Largest asset input is still building.",
+      detail: metrics ? `Assumes a 15% drop in ${metrics.concentrationAsset}, the largest visible position.` : "Waiting for largest asset data.",
       loss: metrics ? formatCurrency(concentrationLoss) : "ACCUMULATING",
       tone: scenarioTone(concentrationLoss, totalUsd),
     },
     {
-      title: "Protocol Haircut",
+      title: "DeFi Haircut",
       shock: "-20%",
-      detail: "Applies a direct protocol-side haircut to visible DeFi exposure.",
+      detail: "Assumes a 20% loss on visible DeFi exposure.",
       loss: formatCurrency(protocolLoss),
       tone: scenarioTone(protocolLoss, totalUsd),
     },
     {
       title: "Stablecoin Depeg",
       shock: "-2%",
-      detail: "Applies a mild depeg shock to visible stablecoin value.",
+      detail: "Assumes a 2% depeg across visible stablecoin value.",
       loss: metrics ? formatCurrency(stableLoss) : "ACCUMULATING",
       tone: scenarioTone(stableLoss, totalUsd),
     },
     {
       title: "Drawdown Replay",
       shock: "30D",
-      detail: "Replays the worst recent peak-to-trough portfolio decline.",
+      detail: "Applies the worst recent peak-to-trough portfolio decline.",
       loss: drawdownReplayLoss == null ? "ACCUMULATING" : formatCurrency(drawdownReplayLoss),
       tone: scenarioTone(drawdownReplayLoss ?? 0, totalUsd),
     },
@@ -637,9 +637,6 @@ function buildRiskPosture(
   if (metrics) {
     if (metrics.stableAllocationPct < 10) score -= 10;
     else if (metrics.stableAllocationPct < 20) score -= 5;
-    else if (metrics.stableAllocationPct > 60) score -= 12;
-    else if (metrics.stableAllocationPct > 40) score -= 6;
-
     if (metrics.maxDrawdownPct30d != null) {
       const drawdown = metrics.maxDrawdownPct30d;
       if (drawdown <= -30) score -= 20;
@@ -659,7 +656,7 @@ function buildRiskPosture(
   }
 
   const bounded = Math.round(clamp(score, 0, 100));
-  const scoreDetail = "Composite score from concentration, stables, drawdown, protocol exposure, and VaR.";
+  const scoreDetail = "Deterministic score: starts at 100, then applies rules for concentration, liquidity, drawdown, DeFi exposure, and VaR.";
   if (bounded < 45) {
     return { score: `${bounded}/100`, label: "ELEVATED RISK", detail: scoreDetail, tone: "red" };
   }
@@ -750,11 +747,13 @@ function buildProtocolData(
   protocolPositionCounts: Record<string, number>,
 ): ProtocolData {
   const groups = new Map<string, { name: string; valueUsd: number; positionCount: number }>();
+  let valueInputCount = 0;
 
   for (const [protocolName, valueUsd] of Object.entries(protocolValues)) {
     if (valueUsd <= 0) {
       continue;
     }
+    valueInputCount += 1;
     const name = readableProtocol(protocolName);
     groups.set(name, {
       name,
@@ -763,25 +762,28 @@ function buildProtocolData(
     });
   }
 
-  for (const position of positions) {
-    const valueUsd = Math.max(position.supplyUsd ?? 0, Math.abs(position.netUsd ?? 0));
-    if (valueUsd <= 0) {
-      continue;
+  if (valueInputCount === 0) {
+    for (const position of positions) {
+      const valueUsd = Math.max(position.supplyUsd ?? 0, Math.abs(position.netUsd ?? 0));
+      if (valueUsd <= 0) {
+        continue;
+      }
+      const name = readableProtocol(position.protocolName || position.protocolKey);
+      const existing = groups.get(name) ?? { name, valueUsd: 0, positionCount: 0 };
+      existing.valueUsd += valueUsd;
+      existing.positionCount += 1;
+      groups.set(name, existing);
     }
-    const name = readableProtocol(position.protocolName || position.protocolKey);
-    const existing = groups.get(name) ?? { name, valueUsd: 0, positionCount: 0 };
-    existing.valueUsd += valueUsd;
-    existing.positionCount += 1;
-    groups.set(name, existing);
   }
 
   const rows = [...groups.values()].sort((left, right) => right.valueUsd - left.valueUsd);
   const totalUsd = rows.reduce((sum, row) => sum + row.valueUsd, 0);
+  const positionCount = rows.reduce((sum, row) => sum + row.positionCount, 0);
   const top = rows[0] ?? null;
 
   return {
     totalUsd,
-    positionCount: positions.length,
+    positionCount,
     topProtocol: top
       ? {
           name: top.name,
@@ -874,9 +876,9 @@ function benchmarkDetail(stats: { bitcoin: BenchmarkStats; solana: BenchmarkStat
 }
 
 function inputDetail(partialInputs: boolean, syncing: boolean): string {
-  if (partialInputs) return "Some modules degraded";
-  if (syncing) return "Live calculations running";
-  return "All modules hydrated";
+  if (partialInputs) return "Some inputs unavailable";
+  if (syncing) return "Calculating metrics";
+  return "Metrics ready";
 }
 
 function metricNumber(value: number | null | undefined): string {
@@ -956,7 +958,7 @@ function clamp(value: number, min: number, max: number): number {
 
 function drawdownRange(metrics: PortfolioMetricsResponse | null): string {
   if (metrics?.maxDrawdownPeakUsd == null || metrics.maxDrawdownTroughUsd == null) {
-    return "Waiting for enough history";
+    return "Waiting for more history";
   }
   return `${formatCurrency(metrics.maxDrawdownPeakUsd)} on ${metrics.maxDrawdownPeakDate ?? "unknown date"} to ${formatCurrency(metrics.maxDrawdownTroughUsd)} on ${metrics.maxDrawdownTroughDate ?? "unknown date"}`;
 }
@@ -974,16 +976,16 @@ function readableProtocol(value: string): string {
 }
 
 function concentrationMeaning(risk: PortfolioMetricsResponse["concentrationRisk"]): string {
-  if (risk === "LOW") return "No single asset is carrying the portfolio.";
-  if (risk === "MEDIUM") return "One asset matters enough to watch closely.";
-  if (risk === "HIGH") return "One asset has strong control over portfolio movement.";
-  return "One asset dominates the portfolio.";
+  if (risk === "LOW") return "Largest asset is within accepted risk bands.";
+  if (risk === "MEDIUM") return "Largest asset is meaningful enough to monitor.";
+  if (risk === "HIGH") return "Largest asset can strongly influence portfolio movement.";
+  return "Largest asset dominates portfolio movement.";
 }
 
 function stableMeaning(value: number): string {
   if (value < 20) return "Mostly market-exposed, with a smaller cash buffer.";
-  if (value <= 40) return "Balanced cash-like buffer.";
-  return "Large cash-like allocation; lower market beta, more idle-capital risk.";
+  if (value <= 40) return "Balanced cash buffer for drawdowns and redeployment.";
+  return "Defensive stable buffer; lower market beta and more available liquidity.";
 }
 
 function riskTone(risk: PortfolioMetricsResponse["concentrationRisk"] | undefined): Tone {
@@ -996,7 +998,6 @@ function riskTone(risk: PortfolioMetricsResponse["concentrationRisk"] | undefine
 function stableTone(value: number): Tone {
   if (value < 20) return "amber";
   if (value <= 40) return "green";
-  if (value > 60) return "amber";
   return "blue";
 }
 
