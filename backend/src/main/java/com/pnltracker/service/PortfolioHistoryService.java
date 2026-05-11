@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -29,6 +30,7 @@ import com.pnltracker.domain.ChainDefinition;
 public class PortfolioHistoryService {
 
     private static final String GOLDRUSH_SOURCE = "goldrush";
+    private static final Pattern EVM_ADDRESS = Pattern.compile("^0x[0-9a-f]{40}$");
 
     private final ChainCatalogService chainCatalogService;
     private final PortfolioHistoryRepository historyRepository;
@@ -56,6 +58,16 @@ public class PortfolioHistoryService {
 
     public PortfolioHistoryResult getHistory(List<String> addresses, List<String> chains, PortfolioHistoryPeriod period) {
         Scope scope = normalizeScope(addresses, chains);
+        if (scope.addresses().isEmpty() || scope.resolvedChains().isEmpty()) {
+            return new PortfolioHistoryResult(
+                    period,
+                    scope.scopeHash(),
+                    List.of(),
+                    false,
+                    List.of(),
+                    Instant.now(clock));
+        }
+
         LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
         LocalDate fromDate = today.minusDays(period.lookbackDays());
         Set<LocalDate> requiredDates = requiredDates(fromDate, today);
@@ -163,20 +175,34 @@ public class PortfolioHistoryService {
             throw new IllegalArgumentException("At least one address is required");
         }
 
-        List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains);
+        List<String> historyAddresses = normalizedAddresses.stream()
+                .filter(this::isEvmAddress)
+                .toList();
+
+        List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains).stream()
+                .filter(this::isGoldRushHistoryChain)
+                .toList();
         List<String> effectiveChains = new ArrayList<>(resolvedChains.stream().map(ChainDefinition::id).sorted().toList());
         effectiveChains = effectiveChains.stream().distinct().sorted().toList();
 
         return new Scope(
-                normalizedAddresses,
+                historyAddresses,
                 resolvedChains,
                 effectiveChains,
-                scopeHash(normalizedAddresses, effectiveChains));
+                scopeHash(historyAddresses, effectiveChains));
     }
 
     private String normalizeWalletKey(String address) {
         String trimmed = address == null ? "" : address.trim();
         return trimmed.matches("(?i)^0x[0-9a-f]{40}$") ? trimmed.toLowerCase(Locale.ROOT) : trimmed;
+    }
+
+    private boolean isEvmAddress(String address) {
+        return EVM_ADDRESS.matcher(address).matches();
+    }
+
+    private boolean isGoldRushHistoryChain(ChainDefinition chain) {
+        return "EVM".equalsIgnoreCase(chain.family());
     }
 
     private String scopeHash(List<String> addresses, List<String> chains) {

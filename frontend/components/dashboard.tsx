@@ -9,6 +9,7 @@ import { PortfolioMetricsBlock } from "@/components/portfolio-metrics-block";
 import { RiskEngineView } from "@/components/risk-engine-view";
 import {
   canonicalAsset,
+  computeHeroDelta,
   computePeriodDelta,
   fetchChains,
   fetchPortfolioBenchmarks,
@@ -33,10 +34,13 @@ import {
 import {
   getMeta,
   listWallets,
+  readPortfolioSnapshotPair,
+  recordPortfolioSnapshot,
   removeWallet,
   saveWallet,
   setMeta,
 } from "@/lib/storage";
+import type { PortfolioSnapshotPair } from "@/lib/storage";
 import type {
   AssetRow,
   ChainAllocation,
@@ -69,6 +73,10 @@ const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
   walletValues: {},
   chainValues: {},
   tokenValues: {},
+  reportedChange24hUsd: null,
+  reportedChange24hPositionCount: 0,
+  snapshottedValueUsd: 0,
+  snapshottedPositionCount: 0,
   loading: false,
 };
 
@@ -153,6 +161,7 @@ export function Dashboard() {
   const [defiSummary, setDefiSummary] = useState<DefiPositionSummaryResponse | null>(null);
   const [solanaDefiTotals, setSolanaDefiTotals] = useState<SolanaDefiTotals>(EMPTY_SOLANA_DEFI_TOTALS);
   const [visibleBenchmarks, setVisibleBenchmarks] = useState({ bitcoin: true, solana: true });
+  const [portfolioSnapshotPair, setPortfolioSnapshotPair] = useState<PortfolioSnapshotPair>({ today: null, prev: null });
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -203,12 +212,32 @@ export function Dashboard() {
   const netWorthComputing = wallets.length > 0 && (refreshing || solanaDefiTotals.loading);
   const syncValueLoading = wallets.length > 0 && totalUsd === 0 && netWorthComputing;
   const chartDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], totalUsd, period),
-    [history?.points, totalUsd, period],
+    () => computePeriodDelta(history?.points ?? [], period),
+    [history?.points, period],
+  );
+  const heroHistoryDelta = useMemo(
+    () => computePeriodDelta(history?.points ?? [], "24h"),
+    [history?.points],
+  );
+  const solanaSpotUsd = useMemo(
+    () => sumAllocationForNetwork(summary?.allocations ?? [], "solana"),
+    [summary?.allocations],
   );
   const heroDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], totalUsd, "24h"),
-    [history?.points, totalUsd],
+    () =>
+      computeHeroDelta(totalUsd, heroHistoryDelta, portfolioSnapshotPair.prev, {
+        solanaSpotUsd,
+        unreportedDefiUsd: solanaDefiTotals.snapshottedValueUsd,
+        reportedDefiChange24hUsd: solanaDefiTotals.reportedChange24hUsd,
+      }),
+    [
+      heroHistoryDelta,
+      portfolioSnapshotPair.prev,
+      solanaDefiTotals.reportedChange24hUsd,
+      solanaDefiTotals.snapshottedValueUsd,
+      solanaSpotUsd,
+      totalUsd,
+    ],
   );
   const chartPoints = useMemo(
     () => buildChartPoints(
@@ -433,6 +462,67 @@ export function Dashboard() {
   }
 
   useEffect(() => {
+    if (!walletHash) {
+      setPortfolioSnapshotPair({ today: null, prev: null });
+      return;
+    }
+    let active = true;
+    void readPortfolioSnapshotPair(walletHash).then((pair) => {
+      if (active) {
+        setPortfolioSnapshotPair(pair);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [walletHash]);
+
+  useEffect(() => {
+    if (
+      !walletHash ||
+      wallets.length === 0 ||
+      refreshing ||
+      solanaDefiTotals.loading ||
+      summary === null ||
+      totalUsd <= 0
+    ) {
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (
+      portfolioSnapshotPair.today?.date === today &&
+      portfolioSnapshotPair.today.totalUsd === totalUsd &&
+      portfolioSnapshotPair.today.solanaSpotUsd === solanaSpotUsd &&
+      portfolioSnapshotPair.today.unreportedDefiUsd === solanaDefiTotals.snapshottedValueUsd
+    ) {
+      return;
+    }
+    let active = true;
+    void recordPortfolioSnapshot(walletHash, today, {
+      totalUsd,
+      solanaSpotUsd,
+      unreportedDefiUsd: solanaDefiTotals.snapshottedValueUsd,
+    }).then((pair) => {
+      if (active) {
+        setPortfolioSnapshotPair(pair);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    walletHash,
+    wallets.length,
+    refreshing,
+    solanaDefiTotals.loading,
+    solanaDefiTotals.snapshottedValueUsd,
+    solanaSpotUsd,
+    totalUsd,
+    summary,
+    portfolioSnapshotPair,
+  ]);
+
+  useEffect(() => {
     if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
       return;
     }
@@ -540,7 +630,9 @@ export function Dashboard() {
     return (
       <div className="s-layout">
         <header className="s-topbar">
-          <span className="s-brand">P&amp;L TERMINAL V3</span>
+          <a className="s-brand" href="/" aria-label="P&L Terminal">
+            <img className="s-brand-logo" src="/logo.png" alt="P&L Terminal" />
+          </a>
         </header>
         <div className="s-loading">
           <p className="s-kicker">INITIALIZING TERMINAL</p>
@@ -568,7 +660,9 @@ export function Dashboard() {
       {/* ── TOP NAVBAR ─────────────────────────────────────────────── */}
       <header className="s-topbar">
         <div className="s-topbar-left">
-          <span className="s-brand">P&amp;L TERMINAL V3</span>
+          <a className="s-brand" href="/" aria-label="P&L Terminal">
+            <img className="s-brand-logo" src="/logo.png" alt="P&L Terminal" />
+          </a>
           <nav className="s-topnav">
             <span className="s-topnav-active">{activeView === "risk-engine" ? "RISK ENGINE" : "LIVE SYNC"}</span>
             <span className="s-topnav-link">{scopeLabel.toUpperCase()}</span>
@@ -591,15 +685,6 @@ export function Dashboard() {
       {/* ── LEFT SIDEBAR ───────────────────────────────────────────── */}
       <aside className="s-sidebar">
 
-        {/* User block */}
-        <div className="s-sidebar-user">
-          <div className="s-sidebar-avatar">P</div>
-          <div>
-            <p className="s-sidebar-name">OPERATOR 01</p>
-            <p className="s-sidebar-level">LEVEL 3 AUTH</p>
-          </div>
-        </div>
-
         {/* Nav */}
         <nav className="s-sidenav">
           <button
@@ -610,7 +695,6 @@ export function Dashboard() {
             DASHBOARD
           </button>
           <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ANALYTICS</button>
-          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>NETWORK EXPOSURE</button>
           <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ASSET INVENTORY</button>
           <button
             className={`s-sidenav-item ${activeView === "risk-engine" ? "s-sidenav-active" : ""}`}
@@ -711,8 +795,6 @@ export function Dashboard() {
             {refreshing ? "SYNCING..." : "EXECUTE SYNC"}
           </button>
           <div className="s-sidebar-sys">
-            <span className="s-sys-line">PROVIDERS: ALCHEMY + GOLDRUSH</span>
-            <span className="s-sys-line">STORAGE: SQLITE + INDEXEDDB</span>
             <span className="s-sys-line">LAST SYNC: {formatRelativeTime(lastRefresh).toUpperCase()}</span>
           </div>
         </div>
@@ -772,7 +854,7 @@ export function Dashboard() {
                   )}
                 </h1>
                 {heroDelta.amount !== null && (
-                  <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
+                  <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`} title={heroDelta.label}>
                     <span className="s-delta-pct">{formatPercent(heroDelta.percentage)}</span>
                     <span className="s-delta-amt mono">{formatCurrency(heroDelta.amount)}</span>
                   </div>
@@ -870,7 +952,7 @@ export function Dashboard() {
                 {/* Portfolio Command Summary */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>PORTFOLIO COMMAND SUMMARY</span>
+                    <span>PORTFOLIO SUMMARY</span>
                     <div className="s-seg-group">
                       <button
                         className={`s-seg-btn ${overviewAllocationView === "strip" ? "is-active" : ""}`}
@@ -899,9 +981,6 @@ export function Dashboard() {
                             ) : (
                               <NetWorthValue value={totalUsd} loading={netWorthComputing} compact />
                             )}
-                          </div>
-                          <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
-                            {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
                           </div>
                         </div>
                         <AllocationDonutChart
@@ -1018,29 +1097,34 @@ export function Dashboard() {
               {/* RIGHT COLUMN (exposure + allocation + readout) */}
               <div className="s-col-side">
 
-              {/* Network Exposure Board */}
                 <div className="s-panel">
                   <div className="s-panel-hd s-panel-hd-blue">
-                    <span>NETWORK EXPOSURE BOARD</span>
+                    <span>NETWORK EXPOSURE</span>
+                    <div className="s-panel-hd-controls">
+                      <span className="s-badge mono">TOP {Math.min(chainAllocationRows.length, 6)}/{chainAllocationRows.length}</span>
+                    </div>
                   </div>
                   <div className="s-panel-body s-exposure-list">
-                    {chainAllocationRows.slice(0, 6).map((item, i) => (
-                      <div key={item.network} className="s-exposure-row">
-                        <div className="s-exposure-meta">
-                          <span className="s-exposure-name">{item.displayName.toUpperCase()}</span>
-                          <span className="mono s-exposure-pct">{formatShare(shareOf(item.valueUsd, totalUsd))}</span>
+                    {chainAllocationRows.slice(0, 6).map((item, i) => {
+                      const share = shareOf(item.valueUsd, totalUsd);
+                      return (
+                        <div key={item.network} className="s-exposure-row" title={`${item.displayName}: ${formatCurrency(item.valueUsd)}`}>
+                          <div className="s-exposure-meta">
+                            <span className="s-exposure-name">{item.displayName.toUpperCase()}</span>
+                            <span className="mono s-exposure-pct">{formatShare(share)}</span>
+                          </div>
+                          <div className="s-bar-track">
+                            <div
+                              className="s-bar-fill"
+                              style={{
+                                width: `${Math.max(share, 0.5)}%`,
+                                backgroundColor: SWATCHES[i % SWATCHES.length],
+                              }}
+                            />
+                          </div>
                         </div>
-                        <div className="s-bar-track">
-                          <div
-                            className="s-bar-fill"
-                            style={{
-                              width: `${shareOf(item.valueUsd, totalUsd)}%`,
-                              backgroundColor: SWATCHES[i % SWATCHES.length],
-                            }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -1048,13 +1132,15 @@ export function Dashboard() {
                 <div className="s-panel">
                   <div className="s-panel-hd">
                     <span>ALLOCATION DETAIL</span>
-                    <span className="s-badge">{allocationMeta.label.toUpperCase()}</span>
+                    <div className="s-panel-hd-controls">
+                      <span className="s-badge">{allocationMeta.label.toUpperCase()}</span>
+                      <span className="s-badge mono">TOP {allocationChartRows.length}/{allocationRows.length}</span>
+                    </div>
                   </div>
                   <div className="s-panel-body">
                     <AllocationDetailList
                       rows={allocationChartRows}
                       mode={allocationMode}
-                      totalRows={allocationRows.length}
                       activeKey={activeAllocationRow ? allocationRowKey(activeAllocationRow) : null}
                       onActiveKeyChange={setHoveredAllocationKey}
                     />
@@ -1104,13 +1190,6 @@ export function Dashboard() {
           <span>SYSTEM STABLE</span>
           <span className="s-sep">|</span>
           <span>{wallets.length} TRACKED WALLETS</span>
-          <span className="s-sep">|</span>
-          <span>LAST BLOCK: #{Math.floor(Date.now() / 1000).toLocaleString()}</span>
-        </div>
-        <div className="s-footer-right">
-          <span>TERMINAL SESSION: {walletHash ? shortHash(walletHash) : "NONE"}</span>
-          <span className="s-sep">|</span>
-          <span>P&amp;L TERMINAL V3</span>
         </div>
       </footer>
 
@@ -1527,13 +1606,11 @@ function AllocationDonutChart({
 function AllocationDetailList({
   rows,
   mode,
-  totalRows,
   activeKey,
   onActiveKeyChange,
 }: {
   rows: AllocationChartRow[];
   mode: AllocationMode;
-  totalRows: number;
   activeKey: string | null;
   onActiveKeyChange: (key: string | null) => void;
 }) {
@@ -1567,16 +1644,15 @@ function AllocationDetailList({
                 <span className="legend-swatch" style={{ backgroundColor: row.color }} />
                 <strong>{row.displayName}</strong>
               </div>
-              <p className="allocation-legend-copy">
-                {row.grouped
-                  ? `${row.groupedCount} smaller ${modeMeta.plural} combined into a single terminal bucket.`
-                  : `${modeMeta.label} concentration tracked inside the current ranked breakdown.`}
-              </p>
+              {row.grouped ? (
+                <p className="allocation-legend-copy">
+                  {`${row.groupedCount} smaller ${modeMeta.plural} combined into a single bucket.`}
+                </p>
+              ) : null}
             </div>
             <div className="allocation-legend-values">
               <strong>{formatShare(row.share)}</strong>
               <span className="mono">{formatCurrency(row.valueUsd)}</span>
-              {index === 0 ? <span className="allocation-legend-note">Lead slice / {totalRows} total</span> : null}
             </div>
           </article>
         );
@@ -1903,6 +1979,14 @@ function buildChainAllocationRows(
   }
 
   return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function sumAllocationForNetwork(allocations: ChainAllocation[], network: string): number {
+  const target = normalizeNetworkKey(network);
+  return allocations.reduce((sum, allocation) => {
+    const key = normalizeNetworkKey(allocation.network);
+    return key === target ? sum + allocation.valueUsd : sum;
+  }, 0);
 }
 
 function normalizeNetworkKey(network: string): string {

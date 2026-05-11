@@ -206,48 +206,144 @@ async function safeError(response: Response): Promise<string | null> {
 
 export function computePeriodDelta(
   points: PortfolioHistoryPoint[],
-  currentTotalUsd: number,
-  period: Period,
+  periodOrCurrentTotalUsd: Period | number,
+  maybePeriod?: Period,
 ): {
   amount: number | null;
   percentage: number | null;
   label: string;
 } {
-  if (points.length === 0) {
+  const period = typeof periodOrCurrentTotalUsd === "string" ? periodOrCurrentTotalUsd : maybePeriod;
+  if (!period) {
     return { amount: null, percentage: null, label: "Not enough history yet" };
   }
 
-  const comparePoint = pickComparisonPoint(points, period);
-  if (!comparePoint || comparePoint.totalUsd === 0) {
+  const historyPoints = points
+    .filter((point) => Number.isFinite(point.totalUsd))
+    .slice()
+    .sort((left, right) => left.localDate.localeCompare(right.localDate));
+
+  if (historyPoints.length < 2) {
     return { amount: null, percentage: null, label: "Not enough history yet" };
   }
 
-  const amount = currentTotalUsd - comparePoint.totalUsd;
+  const latestPoint = historyPoints[historyPoints.length - 1];
+  const comparePoint = pickComparisonPoint(historyPoints, period, latestPoint.localDate);
+  if (!comparePoint || comparePoint.localDate === latestPoint.localDate || comparePoint.totalUsd === 0) {
+    return { amount: null, percentage: null, label: "Not enough history yet" };
+  }
+
+  const amount = latestPoint.totalUsd - comparePoint.totalUsd;
   const percentage = (amount / comparePoint.totalUsd) * 100;
 
   return {
     amount,
     percentage,
-    label: `${period} change`,
+    label: `${period} performance history change`,
   };
 }
 
-function pickComparisonPoint(points: PortfolioHistoryPoint[], period: Period): PortfolioHistoryPoint | null {
+export function computeHeroDelta(
+  currentTotalUsd: number,
+  historyDelta: { amount: number | null; percentage: number | null; label: string },
+  prevSnapshot: {
+    date: string;
+    totalUsd: number;
+    solanaSpotUsd?: number;
+    unreportedDefiUsd?: number;
+  } | null,
+  currentComponents: {
+    solanaSpotUsd: number;
+    unreportedDefiUsd: number;
+    reportedDefiChange24hUsd: number | null;
+  },
+): {
+  amount: number | null;
+  percentage: number | null;
+  label: string;
+} {
+  const sources: string[] = [];
+  let amount = 0;
+
+  if (isFiniteDelta(historyDelta.amount)) {
+    amount += historyDelta.amount;
+    sources.push("performance history");
+  }
+
+  if (isFiniteDelta(currentComponents.reportedDefiChange24hUsd)) {
+    amount += currentComponents.reportedDefiChange24hUsd;
+    sources.push("reported DeFi 24h change");
+  }
+
+  const solanaSpotDelta = componentSnapshotDelta(currentComponents.solanaSpotUsd, prevSnapshot?.solanaSpotUsd);
+  if (solanaSpotDelta !== null) {
+    amount += solanaSpotDelta;
+    sources.push("Solana token snapshot");
+  }
+
+  const unreportedDefiDelta = componentSnapshotDelta(currentComponents.unreportedDefiUsd, prevSnapshot?.unreportedDefiUsd);
+  if (unreportedDefiDelta !== null) {
+    amount += unreportedDefiDelta;
+    sources.push("DeFi position snapshot");
+  }
+
+  if (sources.length === 0 && prevSnapshot && Number.isFinite(prevSnapshot.totalUsd) && prevSnapshot.totalUsd > 0) {
+    const fallbackAmount = currentTotalUsd - prevSnapshot.totalUsd;
+    return {
+      amount: fallbackAmount,
+      percentage: (fallbackAmount / prevSnapshot.totalUsd) * 100,
+      label: `24h change from total portfolio snapshot recorded ${prevSnapshot.date}`,
+    };
+  }
+
+  if (sources.length === 0) {
+    return { amount: null, percentage: null, label: "Awaiting 24h baseline" };
+  }
+
+  const previousKnownTotal = currentTotalUsd - amount;
+  const percentage = previousKnownTotal > 0 ? (amount / previousKnownTotal) * 100 : null;
+
+  return {
+    amount,
+    percentage,
+    label: `24h change from ${sources.join(", ")}`,
+  };
+}
+
+function isFiniteDelta(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function componentSnapshotDelta(currentValue: number, previousValue: number | null | undefined): number | null {
+  if (!Number.isFinite(currentValue) || typeof previousValue !== "number" || !Number.isFinite(previousValue)) {
+    return null;
+  }
+  if (currentValue === 0 && previousValue === 0) {
+    return null;
+  }
+  return currentValue - previousValue;
+}
+
+function pickComparisonPoint(points: PortfolioHistoryPoint[], period: Period, anchorDate: string): PortfolioHistoryPoint | null {
   if (points.length === 0) {
     return null;
   }
 
   const days = period === "24h" ? 1 : period === "7d" ? 7 : 30;
-  const targetDate = new Date();
-  targetDate.setDate(targetDate.getDate() - days);
-  const targetLabel = targetDate.toISOString().slice(0, 10);
+  const targetLabel = offsetLocalDate(anchorDate, -days);
   let candidate: PortfolioHistoryPoint | null = null;
   for (const point of points) {
     if (point.localDate <= targetLabel) {
       candidate = point;
     }
   }
-  return candidate ?? points[0] ?? null;
+  return candidate;
+}
+
+function offsetLocalDate(localDate: string, days: number): string {
+  const date = new Date(`${localDate}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 export function groupAllocationsByToken(assets: AssetRow[]): ChainAllocation[] {

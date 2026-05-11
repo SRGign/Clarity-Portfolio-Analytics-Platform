@@ -13,7 +13,7 @@ import type { WalletRecord } from "@/types/portfolio";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8080/api";
 const MIN_POSITION_VALUE_USD = 1;
-const DEFI_POSITIONS_CACHE_PREFIX = "defi-positions-block-v1";
+const DEFI_POSITIONS_CACHE_PREFIX = "defi-positions-block-v3";
 const DEFI_POSITIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 type DefiPositionsBlockProps = {
@@ -30,6 +30,10 @@ export type SolanaDefiTotals = {
   walletValues: Record<string, number>;
   chainValues: Record<string, number>;
   tokenValues: Record<string, number>;
+  reportedChange24hUsd: number | null;
+  reportedChange24hPositionCount: number;
+  snapshottedValueUsd: number;
+  snapshottedPositionCount: number;
   loading: boolean;
 };
 
@@ -193,11 +197,11 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
 
     if (!forceRefresh) {
       const cachedState = readSessionCache<DefiState>(cacheKey, DEFI_POSITIONS_CACHE_TTL_MS);
-      if (cachedState) {
-        setState({
+      if (cachedState && cachedState.sourceFailures.length === 0) {
+        setState(normalizeDefiState({
           ...cachedState,
           stale: true,
-        });
+        }));
         setLoading(false);
         setError(null);
         return;
@@ -253,8 +257,11 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
         stale: false,
         sourceFailures,
       };
-      setState(nextState);
-      writeSessionCache(cacheKey, nextState);
+      const normalizedState = normalizeDefiState(nextState);
+      setState(normalizedState);
+      if (normalizedState.sourceFailures.length === 0) {
+        writeSessionCache(cacheKey, normalizedState);
+      }
     } catch (loadError) {
       if (controller.signal.aborted) {
         return;
@@ -287,47 +294,63 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
     : groupedPositions.slice(0, collapsedCount);
 
   useEffect(() => {
-    const solanaPositions = state.positions.filter(
-      (position) => normalizeChain(position.chain) === "solana" && !position.alreadyCountedInSpotTotals,
-    );
-    const walletValues = solanaPositions.reduce<Record<string, number>>((values, position) => {
+    const positions = state.positions.map(normalizeStoredDefiPosition);
+    const uncountedPositions = positions.filter((position) => !position.alreadyCountedInSpotTotals);
+    const walletValues = uncountedPositions.reduce<Record<string, number>>((values, position) => {
       values[position.walletAddress] = (values[position.walletAddress] ?? 0) + (position.valueUsd ?? 0);
       return values;
     }, {});
-    const totalValueUsd = solanaPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
-    const protocolExposureUsd = state.positions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
-    const protocolValues = state.positions.reduce<Record<string, number>>((values, position) => {
+    const totalValueUsd = uncountedPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolExposureUsd = positions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolValues = positions.reduce<Record<string, number>>((values, position) => {
       const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
       values[protocolName] = (values[protocolName] ?? 0) + (position.valueUsd ?? 0);
       return values;
     }, {});
-    const protocolPositionCounts = state.positions.reduce<Record<string, number>>((counts, position) => {
+    const protocolPositionCounts = positions.reduce<Record<string, number>>((counts, position) => {
       const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
       counts[protocolName] = (counts[protocolName] ?? 0) + 1;
       return counts;
     }, {});
-    const chainValues = state.positions
+    const chainValues = positions
       .filter((position) => !position.alreadyCountedInSpotTotals)
       .reduce<Record<string, number>>((values, position) => {
         const chain = normalizeChain(position.chain);
         values[chain] = (values[chain] ?? 0) + (position.valueUsd ?? 0);
         return values;
       }, {});
-    const tokenValues = solanaPositions.reduce<Record<string, number>>((values, position) => {
+    const tokenValues = uncountedPositions.reduce<Record<string, number>>((values, position) => {
       const symbol = canonicalDefiTokenSymbol(position.tokenSymbol);
       values[symbol] = (values[symbol] ?? 0) + (position.valueUsd ?? 0);
       return values;
     }, {});
+    const reportedChangePositions = positions.filter(
+      (position) =>
+        !position.alreadyCountedInSpotTotals &&
+        position.change24hUsd !== null &&
+        Number.isFinite(position.change24hUsd),
+    );
+    const reportedChange24hUsd = reportedChangePositions.length === 0
+      ? null
+      : reportedChangePositions.reduce((sum, position) => sum + (position.change24hUsd ?? 0), 0);
+    const snapshottedPositions = positions.filter(
+      (position) => position.change24hUsd === null && !position.alreadyCountedInSpotTotals,
+    );
+    const snapshottedValueUsd = snapshottedPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
 
     onSolanaTotalsChange?.({
       totalValueUsd,
       protocolExposureUsd,
-      protocolPositionCount: state.positions.length,
+      protocolPositionCount: positions.length,
       protocolValues,
       protocolPositionCounts,
       walletValues,
       chainValues,
       tokenValues,
+      reportedChange24hUsd,
+      reportedChange24hPositionCount: reportedChangePositions.length,
+      snapshottedValueUsd,
+      snapshottedPositionCount: snapshottedPositions.length,
       loading,
     });
   }, [loading, onSolanaTotalsChange, state.positions]);
@@ -362,7 +385,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
   return (
     <section className="s-panel">
       <div className="s-panel-hd s-panel-hd-violet">
-        <span>DEFI_POSITIONS_BLOCK</span>
+        <span>DEFI POSITIONS</span>
         <div className="s-panel-hd-controls">
           <span className="s-badge">{groupedPositions.length} GROUPS</span>
           <span className="s-badge">{state.positions.length} POSITIONS</span>
@@ -385,7 +408,7 @@ export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositi
           </div>
           <div className="s-defi-summary-meta">
             <span className="s-badge">{wallets.length} WALLETS</span>
-            {state.stale ? <span className="s-badge">CACHED_SOURCE</span> : <span className="s-live-badge">LIVE_SYNC</span>}
+            {state.stale ? <span className="s-badge">CACHED SOURCE</span> : <span className="s-live-badge">LIVE SYNC</span>}
           </div>
         </div>
 
@@ -824,7 +847,8 @@ function uniqueSourceFailures(failures: string[]): string[] {
 function buildDefiGroups(positions: DefiPosition[]): DefiGroup[] {
   const groups = new Map<string, DefiGroup>();
 
-  for (const position of positions) {
+  for (const inputPosition of positions) {
+    const position = normalizeStoredDefiPosition(inputPosition);
     const poolGroupingKey = position.poolAddress
       ? `${position.protocol}::${position.poolAddress}`
       : position.groupId ?? position.protocol;
@@ -902,6 +926,20 @@ function defiPositionGroupKey(position: DefiPosition): string {
   return [position.walletAddress, poolGroupingKey].join("::").toLowerCase();
 }
 
+function normalizeDefiState(state: DefiState): DefiState {
+  return {
+    ...state,
+    positions: state.positions.map(normalizeStoredDefiPosition),
+  };
+}
+
+function normalizeStoredDefiPosition(position: DefiPosition): DefiPosition {
+  return {
+    ...position,
+    chain: normalizePositionChain(position.protocolName, position.protocol, position.chain),
+  };
+}
+
 function normalizeDefiPosition(
   position: RawDefiPosition,
   wallet: WalletRecord,
@@ -911,7 +949,7 @@ function normalizeDefiPosition(
   const protocolName = position.protocolName?.trim() || position.protocol?.trim() || "Unknown protocol";
   const protocol = position.protocol?.trim() || protocolName;
   const protocolModule = position.protocolModule?.trim() || null;
-  const chain = normalizeChain(position.chain?.trim() || position.chainId?.trim() || "unknown");
+  const chain = normalizePositionChain(protocolName, protocol, position.chain?.trim() || position.chainId?.trim() || "unknown");
   const tokenName = position.tokenName?.trim() || tokenSymbol;
   const tokenAmount = position.tokenAmount ?? position.quantity ?? null;
   const valueUsd = position.valueUsd ?? position.value ?? null;
@@ -1018,11 +1056,35 @@ function chainToneClass(chain: string): string {
 function normalizeChain(value: string): string {
   const normalized = value.trim().toLowerCase();
 
-  if (normalized === "0g") {
+  if (normalized === "0g" || normalized === "eth-mainnet" || normalized === "ethereum-mainnet") {
     return "ethereum";
   }
 
+  if (
+    normalized === "bnb" ||
+    normalized === "bsc" ||
+    normalized === "bnb-mainnet" ||
+    normalized === "bsc-mainnet" ||
+    normalized === "binance-smart-chain-mainnet"
+  ) {
+    return "binance-smart-chain";
+  }
+
   return normalized;
+}
+
+function normalizePositionChain(protocolName: string, protocolKey: string, chain: string): string {
+  const protocol = `${protocolName} ${protocolKey}`.trim().toLowerCase().replace(/[_-]+/g, " ");
+
+  if (protocol.includes("morpho blue")) {
+    return "ethereum";
+  }
+
+  if (protocol.includes("venus flux") || protocol === "venus" || protocol.includes(" venus ")) {
+    return "binance-smart-chain";
+  }
+
+  return normalizeChain(chain);
 }
 
 function canonicalDefiTokenSymbol(value: string): string {
