@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { fetchPositions, listProtocols } from "./service.js";
 import { logger } from "./logger.js";
+import { rpcEndpointHost } from "./rpc.js";
 
 const app = express();
 const startedAt = Date.now();
@@ -9,7 +10,11 @@ const startedAt = Date.now();
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_request, response) => {
-  response.status(200).json({ status: "ok", uptime: Math.floor((Date.now() - startedAt) / 1000) });
+  response.status(200).json({
+    status: "ok",
+    uptime: Math.floor((Date.now() - startedAt) / 1000),
+    rpcEndpointHost
+  });
 });
 
 app.get("/defi/protocols", (_request, response) => {

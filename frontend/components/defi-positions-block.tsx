@@ -1,14 +1,40 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { isValidEvmAddress, isValidSolanaAddress, walletSetHash } from "@/lib/portfolio";
+import {
+  readSessionCache,
+  scopedSessionCacheKey,
+  writeSessionCache,
+} from "@/lib/session-cache";
 import type { WalletRecord } from "@/types/portfolio";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8080/api";
+const MIN_POSITION_VALUE_USD = 1;
+const DEFI_POSITIONS_CACHE_PREFIX = "defi-positions-block-v3";
+const DEFI_POSITIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 type DefiPositionsBlockProps = {
   wallets: WalletRecord[];
+  onSolanaTotalsChange?: (totals: SolanaDefiTotals) => void;
+};
+
+export type SolanaDefiTotals = {
+  totalValueUsd: number;
+  protocolExposureUsd: number;
+  protocolPositionCount: number;
+  protocolValues: Record<string, number>;
+  protocolPositionCounts: Record<string, number>;
+  walletValues: Record<string, number>;
+  chainValues: Record<string, number>;
+  tokenValues: Record<string, number>;
+  reportedChange24hUsd: number | null;
+  reportedChange24hPositionCount: number;
+  snapshottedValueUsd: number;
+  snapshottedPositionCount: number;
+  loading: boolean;
 };
 
 type RawDefiResponse = {
@@ -31,6 +57,7 @@ type RawDefiPosition = {
   tokenSymbol?: string | null;
   tokenName?: string | null;
   tokenIconUrl?: string | null;
+  tokenMint?: string | null;
   tokenAmount?: number | null;
   quantity?: number | null;
   valueUsd?: number | null;
@@ -39,6 +66,56 @@ type RawDefiPosition = {
   absoluteChange1d?: number | null;
   change24hPercent?: number | null;
   percentChange1d?: number | null;
+  alreadyCountedInSpotTotals?: boolean | null;
+};
+
+type TokenizedSolanaResponse = {
+  walletAddress: string;
+  observedAt: string;
+  totalValueUsd: number;
+  positions: TokenizedSolanaPosition[];
+};
+
+type TokenizedSolanaPosition = {
+  mintAddress: string;
+  symbol: string;
+  protocolKey: string;
+  protocolName: string;
+  positionType: string;
+  quantity: number;
+  priceUsd: number | null;
+  valueUsd: number | null;
+  source: string;
+  confidence: string;
+  alreadyCountedInSpotTotals: boolean;
+};
+
+type WorkerPositionToken = {
+  mint: string;
+  symbol: string;
+  decimals: number;
+  amount: number;
+  priceUsd: number;
+  valueUsd: number;
+};
+
+type WorkerPosition = {
+  protocolId: string;
+  protocolName: string;
+  category: string;
+  positionType: string;
+  positionId: string;
+  tokens: WorkerPositionToken[];
+  totalValueUsd: number;
+  pendingRewards?: WorkerPositionToken[];
+  metadata?: Record<string, unknown>;
+};
+
+type WorkerPositionsResponse = {
+  walletAddress: string;
+  fetchedAt: string;
+  positions: WorkerPosition[];
+  errors: Array<{ protocolId: string; message: string }>;
 };
 
 type DefiPosition = {
@@ -56,10 +133,12 @@ type DefiPosition = {
   tokenSymbol: string;
   tokenName: string;
   tokenIconUrl: string | null;
+  tokenMint: string | null;
   tokenAmount: number | null;
   valueUsd: number | null;
   change24hUsd: number | null;
   change24hPercent: number | null;
+  alreadyCountedInSpotTotals: boolean;
 };
 
 type DefiGroup = {
@@ -80,95 +159,131 @@ type DefiState = {
   totalValueUsd: number;
   positions: DefiPosition[];
   stale: boolean;
+  sourceFailures: string[];
 };
 
-export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
+export function DefiPositionsBlock({ wallets, onSolanaTotalsChange }: DefiPositionsBlockProps) {
   const [state, setState] = useState<DefiState>({
     totalValueUsd: 0,
     positions: [],
     stale: false,
+    sourceFailures: [],
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [gridWidth, setGridWidth] = useState(0);
   const groupsRef = useRef<HTMLDivElement | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const cacheKey = useMemo(
+    () => scopedSessionCacheKey(DEFI_POSITIONS_CACHE_PREFIX, [walletSetHash(wallets)]),
+    [wallets],
+  );
 
-  useEffect(() => {
+  const loadPositions = useCallback(async (forceRefresh = false) => {
+    activeRequestRef.current?.abort();
+
     if (wallets.length === 0) {
       setState({
         totalValueUsd: 0,
         positions: [],
         stale: false,
+        sourceFailures: [],
       });
       setLoading(false);
       setError(null);
       return;
     }
 
-    const controller = new AbortController();
-
-    const loadPositions = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const responses = await Promise.all(
-          wallets.map(async (wallet) => {
-            const response = await fetch(
-              `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/defi-positions`,
-              {
-                cache: "no-store",
-                signal: controller.signal,
-              },
-            );
-
-            if (!response.ok) {
-              throw new Error(`Failed to load DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
-            }
-
-            const payload = (await response.json()) as RawDefiResponse;
-            return {
-              wallet,
-              payload,
-            };
-          }),
-        );
-
-        const positions = responses.flatMap(({ wallet, payload }) =>
-          (payload.positions ?? []).map((position, index) =>
-            normalizeDefiPosition(position, wallet, index),
-          ),
-        );
-        const totalValueUsd = responses.reduce(
-          (sum, { payload }) => sum + (payload.totalUsd ?? payload.totalValueUsd ?? 0),
-          0,
-        );
-        const stale = responses.some(({ payload }) => payload.stale === true);
-
-        setState({
-          totalValueUsd,
-          positions,
-          stale,
-        });
-      } catch (loadError) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setError(loadError instanceof Error ? loadError.message : "Failed to load DeFi positions.");
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
+    if (!forceRefresh) {
+      const cachedState = readSessionCache<DefiState>(cacheKey, DEFI_POSITIONS_CACHE_TTL_MS);
+      if (cachedState && cachedState.sourceFailures.length === 0) {
+        setState(normalizeDefiState({
+          ...cachedState,
+          stale: true,
+        }));
+        setLoading(false);
+        setError(null);
+        return;
       }
-    };
+    }
 
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const results = await Promise.allSettled(
+        wallets.map(async (wallet) => {
+          const sourceRequests = buildDefiSourceRequests(wallet, controller.signal);
+          const sourceResults = await Promise.allSettled(sourceRequests.map((source) => source.fetcher));
+
+          const positions = sourceResults.flatMap((result) =>
+            result.status === "fulfilled" ? result.value : [],
+          );
+          const failures = sourceResults.flatMap((result, index) =>
+            result.status === "rejected" ? [sourceRequests[index].label] : [],
+          );
+
+          return { wallet, positions, failures };
+        }),
+      );
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      const fulfilledResults = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const positions = filterReportablePositionGroups(
+        fulfilledResults.flatMap(({ wallet, positions: walletPositions }) =>
+          walletPositions.map((position, index) => normalizeDefiPosition(position, wallet, index)),
+        ),
+      );
+      const totalValueUsd = positions.reduce(
+        (sum, position) => sum + (position.valueUsd ?? 0),
+        0,
+      );
+      const sourceFailures = uniqueSourceFailures(
+        fulfilledResults.flatMap((result) => result.failures),
+      );
+
+      const nextState = {
+        totalValueUsd,
+        positions,
+        stale: false,
+        sourceFailures,
+      };
+      const normalizedState = normalizeDefiState(nextState);
+      setState(normalizedState);
+      if (normalizedState.sourceFailures.length === 0) {
+        writeSessionCache(cacheKey, normalizedState);
+      }
+    } catch (loadError) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      setError(loadError instanceof Error ? loadError.message : "Failed to load DeFi positions.");
+    } finally {
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = null;
+      }
+    }
+  }, [cacheKey, wallets]);
+
+  useEffect(() => {
     void loadPositions();
 
     return () => {
-      controller.abort();
+      activeRequestRef.current?.abort();
     };
-  }, [wallets]);
+  }, [loadPositions]);
 
   const groupedPositions = useMemo(() => buildDefiGroups(state.positions), [state.positions]);
   const columns = useMemo(() => inferColumns(gridWidth), [gridWidth]);
@@ -177,6 +292,68 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
   const visibleGroups = expanded || !hasOverflow
     ? groupedPositions
     : groupedPositions.slice(0, collapsedCount);
+
+  useEffect(() => {
+    const positions = state.positions.map(normalizeStoredDefiPosition);
+    const uncountedPositions = positions.filter((position) => !position.alreadyCountedInSpotTotals);
+    const walletValues = uncountedPositions.reduce<Record<string, number>>((values, position) => {
+      values[position.walletAddress] = (values[position.walletAddress] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
+    const totalValueUsd = uncountedPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolExposureUsd = positions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+    const protocolValues = positions.reduce<Record<string, number>>((values, position) => {
+      const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
+      values[protocolName] = (values[protocolName] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
+    const protocolPositionCounts = positions.reduce<Record<string, number>>((counts, position) => {
+      const protocolName = position.protocolName.trim() || position.protocol.trim() || "Unknown protocol";
+      counts[protocolName] = (counts[protocolName] ?? 0) + 1;
+      return counts;
+    }, {});
+    const chainValues = positions
+      .filter((position) => !position.alreadyCountedInSpotTotals)
+      .reduce<Record<string, number>>((values, position) => {
+        const chain = normalizeChain(position.chain);
+        values[chain] = (values[chain] ?? 0) + (position.valueUsd ?? 0);
+        return values;
+      }, {});
+    const tokenValues = uncountedPositions.reduce<Record<string, number>>((values, position) => {
+      const symbol = canonicalDefiTokenSymbol(position.tokenSymbol);
+      values[symbol] = (values[symbol] ?? 0) + (position.valueUsd ?? 0);
+      return values;
+    }, {});
+    const reportedChangePositions = positions.filter(
+      (position) =>
+        !position.alreadyCountedInSpotTotals &&
+        position.change24hUsd !== null &&
+        Number.isFinite(position.change24hUsd),
+    );
+    const reportedChange24hUsd = reportedChangePositions.length === 0
+      ? null
+      : reportedChangePositions.reduce((sum, position) => sum + (position.change24hUsd ?? 0), 0);
+    const snapshottedPositions = positions.filter(
+      (position) => position.change24hUsd === null && !position.alreadyCountedInSpotTotals,
+    );
+    const snapshottedValueUsd = snapshottedPositions.reduce((sum, position) => sum + (position.valueUsd ?? 0), 0);
+
+    onSolanaTotalsChange?.({
+      totalValueUsd,
+      protocolExposureUsd,
+      protocolPositionCount: positions.length,
+      protocolValues,
+      protocolPositionCounts,
+      walletValues,
+      chainValues,
+      tokenValues,
+      reportedChange24hUsd,
+      reportedChange24hPositionCount: reportedChangePositions.length,
+      snapshottedValueUsd,
+      snapshottedPositionCount: snapshottedPositions.length,
+      loading,
+    });
+  }, [loading, onSolanaTotalsChange, state.positions]);
 
   useEffect(() => {
     setExpanded(false);
@@ -208,7 +385,7 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
   return (
     <section className="s-panel">
       <div className="s-panel-hd s-panel-hd-violet">
-        <span>DEFI_POSITIONS_BLOCK</span>
+        <span>DEFI POSITIONS</span>
         <div className="s-panel-hd-controls">
           <span className="s-badge">{groupedPositions.length} GROUPS</span>
           <span className="s-badge">{state.positions.length} POSITIONS</span>
@@ -220,16 +397,29 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         <div className="s-defi-summary-bar">
           <div className="s-defi-summary-main">
             <span className="s-defi-summary-label">Total DeFi Value</span>
-            <strong className="s-defi-summary-value mono">{formatCurrency(state.totalValueUsd)}</strong>
+            {loading && state.totalValueUsd === 0 ? (
+              <SyncRail label="SCANNING PROTOCOL POSITIONS" />
+            ) : (
+              <strong className="s-defi-summary-value mono">{formatCurrency(state.totalValueUsd)}</strong>
+            )}
             <p className="s-defi-summary-copy">
               Grouped by protocol pool and reward leg across the tracked wallet set.
             </p>
           </div>
           <div className="s-defi-summary-meta">
             <span className="s-badge">{wallets.length} WALLETS</span>
-            {state.stale ? <span className="s-badge">CACHED_SOURCE</span> : <span className="s-live-badge">LIVE_SYNC</span>}
+            {state.stale ? <span className="s-badge">CACHED SOURCE</span> : <span className="s-live-badge">LIVE SYNC</span>}
           </div>
         </div>
+
+        {state.sourceFailures.length > 0 ? (
+          <div className="s-defi-source-warning">
+            <span>Some chains failed to load: {state.sourceFailures.join(", ")}.</span>
+            <button type="button" className="s-btn-outline" onClick={() => void loadPositions(true)}>
+              Retry
+            </button>
+          </div>
+        ) : null}
 
         {wallets.length === 0 ? (
           <StatePanel
@@ -252,7 +442,9 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         ) : (
           <>
             <div className="s-defi-group-grid" ref={groupsRef}>
-              {visibleGroups.map((group) => (
+              {visibleGroups.map((group) => {
+                const isSolanaGroup = normalizeChain(group.chain) === "solana";
+                return (
               <article key={group.key} className="s-defi-group-card">
                 <header className="s-defi-group-header">
                   <div className="s-defi-group-identity">
@@ -268,21 +460,23 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
                       </div>
                     </div>
                   </div>
-                  <div className="s-defi-group-metrics">
+                  <div className={`s-defi-group-metrics ${isSolanaGroup ? "is-single" : ""}`}>
                     <div className="s-defi-metric-stack">
                       <span>Group Value</span>
                       <strong className="mono">{formatCurrency(group.totalValueUsd)}</strong>
                     </div>
-                    <div className="s-defi-metric-stack">
-                      <span>24H Delta</span>
-                      {group.change24hUsd !== null ? (
-                        <strong className={`mono ${changeToneClass(group.change24hUsd)}`}>
-                          {formatSignedCurrency(group.change24hUsd)}
-                        </strong>
-                      ) : (
-                        <strong className="s-muted">Not reported</strong>
-                      )}
-                    </div>
+                    {!isSolanaGroup ? (
+                      <div className="s-defi-metric-stack">
+                        <span>24H Delta</span>
+                        {group.change24hUsd !== null ? (
+                          <strong className={`mono ${changeToneClass(group.change24hUsd)}`}>
+                            {formatSignedCurrency(group.change24hUsd)}
+                          </strong>
+                        ) : (
+                          <strong className="s-muted">Not reported</strong>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 </header>
 
@@ -314,7 +508,8 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
                   </div>
                 ) : null}
               </article>
-              ))}
+                );
+              })}
             </div>
             {hasOverflow ? (
               <div className="s-defi-actions">
@@ -323,7 +518,7 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
                   type="button"
                   onClick={() => setExpanded((current) => !current)}
                 >
-                  {expanded ? "SHOW_LESS" : `SHOW_MORE_${groupedPositions.length - visibleGroups.length}`}
+                  {expanded ? "SHOW LESS" : `SHOW MORE ${groupedPositions.length - visibleGroups.length}`}
                 </button>
               </div>
             ) : null}
@@ -331,6 +526,17 @@ export function DefiPositionsBlock({ wallets }: DefiPositionsBlockProps) {
         )}
       </div>
     </section>
+  );
+}
+
+function SyncRail({ label }: { label: string }) {
+  return (
+    <div className="s-sync-rail" role="status" aria-live="polite">
+      <span className="s-sync-rail-track">
+        <span className="s-sync-rail-fill" />
+      </span>
+      <strong className="mono">{label}</strong>
+    </div>
   );
 }
 
@@ -357,7 +563,12 @@ function PositionRow({
         ) : null}
         <div className="s-defi-position-asset">
           <div className="s-defi-token-identity">
-            <TokenIcon tokenName={position.tokenName} tokenSymbol={position.tokenSymbol} tokenIconUrl={position.tokenIconUrl} />
+            <TokenIcon
+              tokenName={position.tokenName}
+              tokenSymbol={position.tokenSymbol}
+              tokenIconUrl={position.tokenIconUrl}
+              tokenMint={position.tokenMint}
+            />
             <div className="s-defi-token-copy">
               <strong>{position.tokenName}</strong>
               <span>{position.tokenSymbol}</span>
@@ -387,10 +598,11 @@ function ProtocolIcon({
   protocolUrl: string | null;
 }) {
   const [failed, setFailed] = useState(false);
+  const resolvedProtocolUrl = protocolUrl ?? knownProtocolUrl(protocolName);
 
   const faviconUrl =
-    protocolUrl && !failed
-      ? `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(protocolUrl)}`
+    resolvedProtocolUrl && !failed
+      ? `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(resolvedProtocolUrl)}`
       : null;
 
   return (
@@ -415,14 +627,17 @@ function TokenIcon({
   tokenName,
   tokenSymbol,
   tokenIconUrl,
+  tokenMint,
 }: {
   tokenName: string;
   tokenSymbol: string;
   tokenIconUrl: string | null;
+  tokenMint: string | null;
 }) {
   const [failed, setFailed] = useState(false);
+  const resolvedIconUrl = tokenIconUrl ?? solanaTokenIconUrl(tokenMint) ?? knownTokenIconUrl(tokenSymbol);
 
-  if (!tokenIconUrl || failed) {
+  if (!resolvedIconUrl || failed) {
     return (
       <span className="s-defi-token-icon-fallback" aria-hidden="true">
         {(tokenSymbol || tokenName).slice(0, 1).toUpperCase()}
@@ -432,7 +647,7 @@ function TokenIcon({
 
   return (
     <img
-      src={tokenIconUrl}
+      src={resolvedIconUrl}
       alt=""
       className="s-defi-token-icon"
       loading="lazy"
@@ -478,10 +693,162 @@ function LoadingSkeleton() {
   );
 }
 
+async function fetchEvmPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load EVM DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as RawDefiResponse;
+  return payload.positions ?? [];
+}
+
+function buildDefiSourceRequests(
+  wallet: WalletRecord,
+  signal: AbortSignal,
+): Array<{ label: string; fetcher: Promise<RawDefiPosition[]> }> {
+  const requests: Array<{ label: string; fetcher: Promise<RawDefiPosition[]> }> = [];
+
+  if (isValidEvmAddress(wallet.normalizedAddress)) {
+    requests.push({
+      label: "EVM",
+      fetcher: fetchEvmPositions(wallet, signal),
+    });
+  }
+
+  if (isValidSolanaAddress(wallet.normalizedAddress)) {
+    requests.push({
+      label: "Solana",
+      fetcher: fetchSolanaWorkerPositions(wallet, signal),
+    });
+  }
+
+  return requests;
+}
+
+async function fetchSolanaWorkerPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/solana/defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load Solana DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as WorkerPositionsResponse;
+  const workerUnavailable = payload.errors?.some((error) => error.protocolId === "worker") ?? false;
+
+  if (workerUnavailable) {
+    return fetchTokenizedSolanaPositions(wallet, signal);
+  }
+
+  const workerPositions = (payload.positions ?? []).flatMap((position) => [
+    ...(position.tokens ?? []).map((token) => mapWorkerPositionToRaw(position, token)),
+    ...(position.pendingRewards ?? []).map((token) => mapWorkerPositionToRaw(position, token, "reward")),
+  ]);
+
+  if (workerPositions.length > 0) {
+    return workerPositions;
+  }
+
+  return fetchTokenizedSolanaPositions(wallet, signal);
+}
+
+async function fetchTokenizedSolanaPositions(wallet: WalletRecord, signal: AbortSignal): Promise<RawDefiPosition[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/wallets/${wallet.normalizedAddress}/solana/tokenized-defi-positions`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load tokenized Solana DeFi positions for ${wallet.label || shortAddress(wallet.originalInput)}.`);
+  }
+
+  const payload = (await response.json()) as TokenizedSolanaResponse;
+  return (payload.positions ?? []).map(mapTokenizedSolanaPositionToRaw);
+}
+
+function mapWorkerPositionToRaw(
+  workerPosition: WorkerPosition,
+  token: WorkerPositionToken,
+  positionType = workerPosition.positionType,
+): RawDefiPosition {
+  return {
+    positionType,
+    protocol: workerPosition.protocolId,
+    protocolName: workerPosition.protocolName,
+    chain: "solana",
+    chainId: "solana",
+    tokenSymbol: token.symbol,
+    tokenName: token.symbol,
+    tokenIconUrl: solanaTokenIconUrl(token.mint),
+    tokenMint: token.mint,
+    tokenAmount: token.amount,
+    quantity: token.amount,
+    valueUsd: token.valueUsd,
+    value: token.valueUsd,
+    groupId: workerPosition.positionId,
+    poolAddress: null,
+    protocolUrl: null,
+    protocolModule: workerPosition.category ?? null,
+    change24hUsd: null,
+    absoluteChange1d: null,
+    change24hPercent: null,
+    percentChange1d: null,
+    alreadyCountedInSpotTotals: false,
+  };
+}
+
+function mapTokenizedSolanaPositionToRaw(position: TokenizedSolanaPosition): RawDefiPosition {
+  return {
+    positionType: position.positionType,
+    protocol: position.protocolKey,
+    protocolName: position.protocolName,
+    chain: "solana",
+    chainId: "solana",
+    tokenSymbol: position.symbol,
+    tokenName: position.symbol,
+    tokenIconUrl: solanaTokenIconUrl(position.mintAddress),
+    tokenMint: position.mintAddress,
+    tokenAmount: position.quantity,
+    quantity: position.quantity,
+    valueUsd: position.valueUsd,
+    value: position.valueUsd,
+    groupId: `${position.protocolKey}:${position.mintAddress}`,
+    poolAddress: position.mintAddress,
+    protocolUrl: null,
+    protocolModule: position.source,
+    change24hUsd: null,
+    absoluteChange1d: null,
+    change24hPercent: null,
+    percentChange1d: null,
+    alreadyCountedInSpotTotals: position.alreadyCountedInSpotTotals,
+  };
+}
+
+function uniqueSourceFailures(failures: string[]): string[] {
+  return [...new Set(failures)];
+}
+
 function buildDefiGroups(positions: DefiPosition[]): DefiGroup[] {
   const groups = new Map<string, DefiGroup>();
 
-  for (const position of positions) {
+  for (const inputPosition of positions) {
+    const position = normalizeStoredDefiPosition(inputPosition);
     const poolGroupingKey = position.poolAddress
       ? `${position.protocol}::${position.poolAddress}`
       : position.groupId ?? position.protocol;
@@ -540,6 +907,39 @@ function buildDefiGroups(positions: DefiPosition[]): DefiGroup[] {
     .sort((left, right) => right.totalValueUsd - left.totalValueUsd);
 }
 
+function filterReportablePositionGroups(positions: DefiPosition[]): DefiPosition[] {
+  const groupTotals = positions.reduce<Map<string, number>>((totals, position) => {
+    const key = defiPositionGroupKey(position);
+    totals.set(key, (totals.get(key) ?? 0) + (position.valueUsd ?? 0));
+    return totals;
+  }, new Map());
+
+  return positions.filter((position) =>
+    Math.abs(groupTotals.get(defiPositionGroupKey(position)) ?? 0) >= MIN_POSITION_VALUE_USD,
+  );
+}
+
+function defiPositionGroupKey(position: DefiPosition): string {
+  const poolGroupingKey = position.poolAddress
+    ? `${position.protocol}::${position.poolAddress}`
+    : position.groupId ?? position.protocol;
+  return [position.walletAddress, poolGroupingKey].join("::").toLowerCase();
+}
+
+function normalizeDefiState(state: DefiState): DefiState {
+  return {
+    ...state,
+    positions: state.positions.map(normalizeStoredDefiPosition),
+  };
+}
+
+function normalizeStoredDefiPosition(position: DefiPosition): DefiPosition {
+  return {
+    ...position,
+    chain: normalizePositionChain(position.protocolName, position.protocol, position.chain),
+  };
+}
+
 function normalizeDefiPosition(
   position: RawDefiPosition,
   wallet: WalletRecord,
@@ -549,12 +949,13 @@ function normalizeDefiPosition(
   const protocolName = position.protocolName?.trim() || position.protocol?.trim() || "Unknown protocol";
   const protocol = position.protocol?.trim() || protocolName;
   const protocolModule = position.protocolModule?.trim() || null;
-  const chain = normalizeChain(position.chain?.trim() || position.chainId?.trim() || "unknown");
+  const chain = normalizePositionChain(protocolName, protocol, position.chain?.trim() || position.chainId?.trim() || "unknown");
   const tokenName = position.tokenName?.trim() || tokenSymbol;
   const tokenAmount = position.tokenAmount ?? position.quantity ?? null;
   const valueUsd = position.valueUsd ?? position.value ?? null;
   const change24hUsd = position.change24hUsd ?? position.absoluteChange1d ?? null;
   const change24hPercent = position.change24hPercent ?? position.percentChange1d ?? null;
+  const alreadyCountedInSpotTotals = position.alreadyCountedInSpotTotals ?? false;
   const walletLabel = wallet.label?.trim() || shortAddress(wallet.originalInput);
   const keyParts = [
     wallet.normalizedAddress,
@@ -579,10 +980,12 @@ function normalizeDefiPosition(
     tokenSymbol,
     tokenName,
     tokenIconUrl: position.tokenIconUrl?.trim() || null,
+    tokenMint: position.tokenMint?.trim() || null,
     tokenAmount,
     valueUsd,
     change24hUsd,
     change24hPercent,
+    alreadyCountedInSpotTotals,
   };
 }
 
@@ -631,6 +1034,7 @@ function displayChain(chain: string): string {
   if (normalized === "polygon") return "Polygon";
   if (normalized === "optimism") return "Optimism";
   if (normalized === "base") return "Base";
+  if (normalized === "solana") return "Solana";
 
   return toTitleCase(normalized.replace(/-/g, " "));
 }
@@ -643,6 +1047,7 @@ function chainToneClass(chain: string): string {
   if (normalized === "polygon") return "is-polygon";
   if (normalized === "optimism") return "is-optimism";
   if (normalized === "base") return "is-base";
+  if (normalized === "solana") return "is-solana";
   if (normalized === "binance-smart-chain") return "is-bsc";
 
   return "is-default";
@@ -651,11 +1056,42 @@ function chainToneClass(chain: string): string {
 function normalizeChain(value: string): string {
   const normalized = value.trim().toLowerCase();
 
-  if (normalized === "0g") {
+  if (normalized === "0g" || normalized === "eth-mainnet" || normalized === "ethereum-mainnet") {
     return "ethereum";
   }
 
+  if (
+    normalized === "bnb" ||
+    normalized === "bsc" ||
+    normalized === "bnb-mainnet" ||
+    normalized === "bsc-mainnet" ||
+    normalized === "binance-smart-chain-mainnet"
+  ) {
+    return "binance-smart-chain";
+  }
+
   return normalized;
+}
+
+function normalizePositionChain(protocolName: string, protocolKey: string, chain: string): string {
+  const protocol = `${protocolName} ${protocolKey}`.trim().toLowerCase().replace(/[_-]+/g, " ");
+
+  if (protocol.includes("morpho blue")) {
+    return "ethereum";
+  }
+
+  if (protocol.includes("venus flux") || protocol === "venus" || protocol.includes(" venus ")) {
+    return "binance-smart-chain";
+  }
+
+  return normalizeChain(chain);
+}
+
+function canonicalDefiTokenSymbol(value: string): string {
+  const symbol = value.trim().toUpperCase();
+  if (symbol === "USDC.E") return "USDC";
+  if (symbol === "WETH") return "ETH";
+  return symbol || "UNKNOWN";
 }
 
 function resolveGroupChain(
@@ -671,6 +1107,8 @@ function resolveGroupChain(
   if (orderedChains.includes("ethereum")) return "ethereum";
   if (orderedChains.includes("arbitrum")) return "arbitrum";
   if (orderedChains.includes("base")) return "base";
+  if (orderedChains.includes("solana")) return "solana";
+  if (orderedChains.includes("binance-smart-chain")) return "binance-smart-chain";
   if (orderedChains.includes("optimism")) return "optimism";
   if (orderedChains.includes("polygon")) return "polygon";
 
@@ -707,6 +1145,36 @@ function changeToneClass(value: number): string {
   if (value > 0) return "tone-positive";
   if (value < 0) return "tone-negative";
   return "";
+}
+
+function knownProtocolUrl(protocolName: string): string | null {
+  const normalized = protocolName.trim().toLowerCase();
+  if (normalized.includes("marginfi")) return "https://www.marginfi.com";
+  if (normalized.includes("meteora") || normalized.includes("dlmm")) return "https://www.meteora.ag";
+  if (normalized.includes("kamino") || normalized.includes("camina")) return "https://kamino.finance";
+  if (normalized.includes("raydium")) return "https://raydium.io";
+  if (normalized.includes("jupiter")) return "https://jup.ag";
+  if (normalized.includes("jito")) return "https://www.jito.network";
+  return null;
+}
+
+function solanaTokenIconUrl(mint: string | null | undefined): string | null {
+  const normalized = mint?.trim();
+  if (!normalized) {
+    return null;
+  }
+  return `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${encodeURIComponent(normalized)}/logo.png`;
+}
+
+function knownTokenIconUrl(tokenSymbol: string): string | null {
+  const normalized = tokenSymbol.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (normalized === "USDC") {
+    return "https://assets.coingecko.com/coins/images/6319/small/usdc.png";
+  }
+  if (normalized === "JITOSOL") {
+    return "https://assets.coingecko.com/coins/images/28045/small/JitoSOL-200.png";
+  }
+  return null;
 }
 
 function toTitleCase(value: string): string {

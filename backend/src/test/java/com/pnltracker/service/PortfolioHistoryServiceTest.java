@@ -11,6 +11,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +22,8 @@ import com.pnltracker.domain.ChainDefinition;
 class PortfolioHistoryServiceTest {
 
     private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-03-28T12:00:00Z"), ZoneOffset.UTC);
+    private static final String EVM_ADDRESS = "0x1111111111111111111111111111111111111111";
+    private static final String SOLANA_ADDRESS = "So11111111111111111111111111111111111111112";
 
     private InMemoryHistoryRepository repository;
 
@@ -29,27 +33,26 @@ class PortfolioHistoryServiceTest {
     }
 
     @Test
-    void aggregatesProviderHistoryAndReusesPersistedSnapshots() {
+    void persistsGoldRushHistoryAndReusesPersistedSnapshots() {
         PortfolioHistoryService service = new PortfolioHistoryService(
                 new ChainCatalogService(),
                 repository,
-                List.of(
-                        request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
-                        request -> new PortfolioHistoryFetchResult("hyperliquid", values(request.requiredDates(), "50.00", "55.00"), Set.of())),
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
                 FIXED_CLOCK);
 
         PortfolioHistoryResult first = service.getHistory(
-                List.of("0xabc"),
+                List.of(EVM_ADDRESS),
                 List.of("ethereum"),
                 PortfolioHistoryPeriod.H24);
 
         assertThat(first.points()).hasSize(2);
         assertThat(first.points()).allMatch(point -> !point.persisted());
-        assertThat(first.points().get(0).totalUsd()).isEqualByComparingTo("150.00");
-        assertThat(first.points().get(1).totalUsd()).isEqualByComparingTo("165.00");
+        assertThat(first.points()).extracting(PortfolioHistoryResultPoint::source).containsOnly("goldrush");
+        assertThat(first.points().get(0).totalUsd()).isEqualByComparingTo("100.00");
+        assertThat(first.points().get(1).totalUsd()).isEqualByComparingTo("110.00");
 
         PortfolioHistoryResult second = service.getHistory(
-                List.of("0xabc"),
+                List.of(EVM_ADDRESS),
                 List.of("ethereum"),
                 PortfolioHistoryPeriod.H24);
 
@@ -63,19 +66,94 @@ class PortfolioHistoryServiceTest {
         PortfolioHistoryService service = new PortfolioHistoryService(
                 new ChainCatalogService(),
                 repository,
-                List.of(
-                        request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "80.00", "90.00"), Set.of("linea")),
-                        request -> new PortfolioHistoryFetchResult("hyperliquid", Map.of(), Set.of())),
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "80.00", "90.00"), Set.of("linea")),
                 FIXED_CLOCK);
 
         PortfolioHistoryResult result = service.getHistory(
-                List.of("0xabc"),
+                List.of(EVM_ADDRESS),
                 List.of("linea"),
                 PortfolioHistoryPeriod.H24);
 
         assertThat(result.partial()).isTrue();
         assertThat(result.missingChains()).containsExactly("linea");
         assertThat(repository.snapshots()).allMatch(PortfolioHistorySnapshot::partial);
+    }
+
+    @Test
+    void ignoresNonGoldRushSnapshotsAlreadyInStorage() {
+        PortfolioHistoryService service = new PortfolioHistoryService(
+                new ChainCatalogService(),
+                repository,
+                request -> new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of()),
+                FIXED_CLOCK);
+
+        PortfolioHistoryService legacyWriter = new PortfolioHistoryService(
+                new ChainCatalogService(),
+                repository,
+                request -> new PortfolioHistoryFetchResult("hyperliquid", values(request.requiredDates(), "999.00", "999.00"), Set.of()),
+                FIXED_CLOCK);
+        legacyWriter.getHistory(List.of(EVM_ADDRESS), List.of("ethereum"), PortfolioHistoryPeriod.H24);
+
+        PortfolioHistoryResult result = service.getHistory(
+                List.of(EVM_ADDRESS),
+                List.of("ethereum"),
+                PortfolioHistoryPeriod.H24);
+
+        assertThat(result.points()).hasSize(2);
+        assertThat(result.points()).extracting(PortfolioHistoryResultPoint::source).containsOnly("goldrush");
+        assertThat(result.points().get(0).totalUsd()).isEqualByComparingTo("100.00");
+        assertThat(result.points().get(1).totalUsd()).isEqualByComparingTo("110.00");
+    }
+
+    @Test
+    void excludesSolanaWalletsAndChainsFromGoldRushHistoryScope() {
+        AtomicReference<PortfolioHistoryFetchRequest> capturedRequest = new AtomicReference<>();
+        PortfolioHistoryService service = new PortfolioHistoryService(
+                new ChainCatalogService(),
+                repository,
+                request -> {
+                    capturedRequest.set(request);
+                    return new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of());
+                },
+                FIXED_CLOCK);
+
+        PortfolioHistoryResult mixedScope = service.getHistory(
+                List.of(EVM_ADDRESS, SOLANA_ADDRESS),
+                List.of("ethereum", "solana"),
+                PortfolioHistoryPeriod.H24);
+        PortfolioHistoryResult evmScope = service.getHistory(
+                List.of(EVM_ADDRESS),
+                List.of("ethereum"),
+                PortfolioHistoryPeriod.H24);
+
+        assertThat(capturedRequest.get().addresses()).containsExactly(EVM_ADDRESS);
+        assertThat(capturedRequest.get().chains()).extracting(ChainDefinition::id).containsExactly("ethereum");
+        assertThat(mixedScope.scopeHash()).isEqualTo(evmScope.scopeHash());
+        assertThat(evmScope.points()).allMatch(PortfolioHistoryResultPoint::persisted);
+        assertThat(repository.snapshots()).hasSize(2);
+    }
+
+    @Test
+    void returnsEmptyHistoryWhenRequestHasNoEvmHistoryScope() {
+        AtomicBoolean providerCalled = new AtomicBoolean(false);
+        PortfolioHistoryService service = new PortfolioHistoryService(
+                new ChainCatalogService(),
+                repository,
+                request -> {
+                    providerCalled.set(true);
+                    return new PortfolioHistoryFetchResult("goldrush", values(request.requiredDates(), "100.00", "110.00"), Set.of());
+                },
+                FIXED_CLOCK);
+
+        PortfolioHistoryResult result = service.getHistory(
+                List.of(SOLANA_ADDRESS),
+                List.of("solana"),
+                PortfolioHistoryPeriod.H24);
+
+        assertThat(result.points()).isEmpty();
+        assertThat(result.partial()).isFalse();
+        assertThat(providerCalled).isFalse();
+        assertThat(repository.snapshots()).isEmpty();
     }
 
     private Map<LocalDate, BigDecimal> values(Set<LocalDate> requiredDates, String first, String second) {

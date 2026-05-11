@@ -106,6 +106,93 @@ export type PortfolioHistoryResponse = {
   asOf: string;
 };
 
+export type PortfolioMetricsResponse = {
+  totalUsd: number;
+  concentrationPct: number;
+  concentrationUsd: number;
+  concentrationAsset: string;
+  concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  stableAllocationPct: number;
+  stableUsd: number;
+  deployedStableUsd: number;
+  defiAllocationPct: number;
+  defiExposureUsd: number;
+  defiNetUsd: number;
+  defiPositionCount: number;
+  idleStableUsd: number;
+  monthlyOpportunityCostUsd: number;
+  sharpe30d: number | null;
+  sortino30d: number | null;
+  maxDrawdownPct30d: number | null;
+  averageDailyReturnPct30d: number | null;
+  dailyVolatilityPct30d: number | null;
+  downsideDeviationPct30d: number | null;
+  historyStartDate: string | null;
+  historyEndDate: string | null;
+  maxDrawdownPeakDate: string | null;
+  maxDrawdownTroughDate: string | null;
+  maxDrawdownPeakUsd: number | null;
+  maxDrawdownTroughUsd: number | null;
+  historyDaysAvailable: number;
+};
+
+export type BenchmarkPoint = {
+  timestamp: number;
+  index: number;
+};
+
+export type BenchmarkData = {
+  bitcoin: BenchmarkPoint[];
+  solana: BenchmarkPoint[];
+};
+
+export type AiAdvisorRisk = {
+  severity: "HIGH" | "MEDIUM" | "LOW";
+  title: string;
+  detail: string;
+  impactUsd: number | null;
+};
+
+export type AiAdvisorOpportunity = {
+  title: string;
+  detail: string;
+  gainUsd: number | null;
+  effort: "LOW" | "MEDIUM" | "HIGH";
+};
+
+export type AiAdvisorAction = {
+  priority: "URGENT" | "THIS_WEEK" | "CONSIDER";
+  action: string;
+  rationale: string;
+};
+
+export type AiAdvisorSummary = {
+  healthScore: number;
+  healthLabel: "STRONG" | "GOOD" | "MODERATE" | "WEAK" | "CRITICAL";
+  oneLiner: string;
+  metrics: {
+    concentrationRisk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    liquidityScore: number;
+    yieldEfficiency: number;
+    diversificationScore: number;
+    idleStableUsd: number;
+  };
+  risks: AiAdvisorRisk[];
+  opportunities: AiAdvisorOpportunity[];
+  actions: AiAdvisorAction[];
+  caveat: string;
+};
+
+export type AiAdvisorError = {
+  error: string;
+  message?: string;
+};
+
+export type AiChatMessage = {
+  role: "user" | "model";
+  text: string;
+};
+
 export type ChainOption = {
   id: string;
   providerNetwork: string;

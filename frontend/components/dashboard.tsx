@@ -3,12 +3,22 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { DefiPositionsBlock } from "@/components/defi-positions-block";
+import type { SolanaDefiTotals } from "@/components/defi-positions-block";
+import { AiAdvisorBlock } from "@/components/ai-advisor-block";
+import { PortfolioMetricsBlock } from "@/components/portfolio-metrics-block";
+import { RiskEngineView } from "@/components/risk-engine-view";
 import {
+  canonicalAsset,
+  computeHeroDelta,
   computePeriodDelta,
   fetchChains,
+  fetchPortfolioBenchmarks,
   fetchPortfolioHistory,
+  fetchPortfolioMetrics,
   groupAllocationsByToken,
   isValidEvmAddress,
+  isValidSolanaAddress,
+  isValidWalletAddress,
   normalizeAddress,
   PERIODS,
   Period,
@@ -16,12 +26,21 @@ import {
   walletSetHash,
 } from "@/lib/portfolio";
 import {
+  clearSessionCache,
+  readSessionCache,
+  scopedSessionCacheKey,
+  writeSessionCache,
+} from "@/lib/session-cache";
+import {
   getMeta,
   listWallets,
+  readPortfolioSnapshotPair,
+  recordPortfolioSnapshot,
   removeWallet,
   saveWallet,
   setMeta,
 } from "@/lib/storage";
+import type { PortfolioSnapshotPair } from "@/lib/storage";
 import type {
   AssetRow,
   ChainAllocation,
@@ -32,26 +51,38 @@ import type {
   LendingPositionSummaryResponse,
   PortfolioHistoryPoint,
   PortfolioHistoryResponse,
+  BenchmarkData,
+  PortfolioMetricsResponse,
   PortfolioSummaryResponse,
   WalletRecord,
 } from "@/types/portfolio";
 
 const SELECTED_CHAINS_KEY = "selected-chains";
+const SELECTED_CHAINS_CATALOG_KEY = "selected-chains-catalog";
 const SWATCHES = ["#2f78d1", "#6d7fe7", "#5975db", "#f07a2c", "#bfdc3c", "#7ec8d8", "#12a7a1", "#a6a0dd"];
 const OTHER_SWATCH = "#5d6674";
 const MAX_ALLOCATION_SLICES = 6;
+const PORTFOLIO_METRICS_CACHE_PREFIX = "portfolio-risk-metrics-v1";
+const PORTFOLIO_METRICS_CACHE_TTL_MS = 10 * 60 * 1000;
+const EMPTY_SOLANA_DEFI_TOTALS: SolanaDefiTotals = {
+  totalValueUsd: 0,
+  protocolExposureUsd: 0,
+  protocolPositionCount: 0,
+  protocolValues: {},
+  protocolPositionCounts: {},
+  walletValues: {},
+  chainValues: {},
+  tokenValues: {},
+  reportedChange24hUsd: null,
+  reportedChange24hPositionCount: 0,
+  snapshottedValueUsd: 0,
+  snapshottedPositionCount: 0,
+  loading: false,
+};
 
 type AllocationMode = "token" | "chain" | "wallet";
 type AllocationView = "strip" | "ring";
-
-type ActivityItem = {
-  id: string;
-  kind: string;
-  title: string;
-  detail: string;
-  timestamp: string;
-  valueUsd: number | null;
-};
+type MainView = "dashboard" | "risk-engine";
 
 type ChartPoint = {
   label: string;
@@ -62,11 +93,38 @@ type ChartPoint = {
   tooltipContext: string;
 };
 
-type AllocationChartRow = ChainAllocation & {
+type AllocationSourceBreakdown = {
+  label: string;
+  valueUsd: number;
+};
+
+type AllocationInputRow = ChainAllocation & {
+  sourceBreakdown?: AllocationSourceBreakdown[];
+};
+
+type AllocationChartRow = AllocationInputRow & {
   share: number;
   color: string;
   grouped: boolean;
   groupedCount: number;
+};
+
+type AssetInventoryRow = {
+  key: string;
+  symbol: string;
+  name: string;
+  quantity: number;
+  priceUsd: number;
+  valueUsd: number;
+  networks: string[];
+  networkBreakdown: Array<{
+    network: string;
+    label: string;
+    valueUsd: number;
+    share: number;
+  }>;
+  networkLabel: string;
+  typeLabel: string;
 };
 
 export function Dashboard() {
@@ -75,42 +133,58 @@ export function Dashboard() {
   const [selectedChains, setSelectedChains] = useState<string[]>([]);
   const [summary, setSummary] = useState<PortfolioSummaryResponse | null>(null);
   const [history, setHistory] = useState<PortfolioHistoryResponse | null>(null);
+  const [benchmarks, setBenchmarks] = useState<BenchmarkData | null>(null);
+  const [portfolioMetrics, setPortfolioMetrics] = useState<PortfolioMetricsResponse | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
+  const [metricsPartial, setMetricsPartial] = useState(false);
+  const [historyPartial, setHistoryPartial] = useState(false);
+  const [benchmarkPartial, setBenchmarkPartial] = useState(false);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [historyWarning, setHistoryWarning] = useState<string | null>(null);
   const [inputAddress, setInputAddress] = useState("");
   const [inputLabel, setInputLabel] = useState("");
   const [duplicateAddress, setDuplicateAddress] = useState<string | null>(null);
   const [activeWallet, setActiveWallet] = useState<string | null>(null);
-  const [period, setPeriod] = useState<Period>("24h");
+  const [period, setPeriod] = useState<Period>("30d");
   const [allocationMode, setAllocationMode] = useState<AllocationMode>("token");
   const [overviewAllocationView, setOverviewAllocationView] = useState<AllocationView>("strip");
+  const [activeView, setActiveView] = useState<MainView>("dashboard");
   const [hoveredAllocationKey, setHoveredAllocationKey] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
   const [positions, setPositions] = useState<LendingPositionResponse[]>([]);
   const [defiPositions, setDefiPositions] = useState<DefiPositionResponse[]>([]);
   const [positionSummary, setPositionSummary] = useState<LendingPositionSummaryResponse | null>(null);
   const [defiSummary, setDefiSummary] = useState<DefiPositionSummaryResponse | null>(null);
+  const [solanaDefiTotals, setSolanaDefiTotals] = useState<SolanaDefiTotals>(EMPTY_SOLANA_DEFI_TOTALS);
+  const [visibleBenchmarks, setVisibleBenchmarks] = useState({ bitcoin: true, solana: true });
+  const [portfolioSnapshotPair, setPortfolioSnapshotPair] = useState<PortfolioSnapshotPair>({ today: null, prev: null });
 
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [storedWallets, supportedChains, savedSelectedChains, savedLastRefresh] =
+        const [storedWallets, supportedChains, savedSelectedChains, savedChainCatalog, savedLastRefresh] =
           await Promise.all([
             listWallets(),
             fetchChains(),
             getMeta(SELECTED_CHAINS_KEY),
+            getMeta(SELECTED_CHAINS_CATALOG_KEY),
             getMeta("last-refresh"),
           ]);
+        const chainSelection = reconcileSelectedChains(supportedChains, savedSelectedChains, savedChainCatalog);
+        const chainCatalogSignature = catalogSignature(supportedChains);
 
         setWallets(storedWallets);
         setChains(supportedChains);
-        setSelectedChains(
-          savedSelectedChains?.split(",").filter(Boolean) ?? supportedChains.map((chain) => chain.id),
-        );
+        setSelectedChains(chainSelection);
         setLastRefresh(savedLastRefresh);
+        await Promise.all([
+          setMeta(SELECTED_CHAINS_CATALOG_KEY, chainCatalogSignature),
+          chainSelection.join(",") !== (savedSelectedChains ?? "") ? setMeta(SELECTED_CHAINS_KEY, chainSelection.join(",")) : Promise.resolve(),
+        ]);
       } catch (bootstrapError) {
         setError(bootstrapError instanceof Error ? bootstrapError.message : "Failed to load local data");
       } finally {
@@ -128,31 +202,80 @@ export function Dashboard() {
   }, [loading, wallets.length, selectedChains.join("|")]);
 
   const walletHash = useMemo(() => walletSetHash(wallets), [wallets]);
-  const totalUsd = summary?.totalUsd ?? 0;
+  const selectedChainKey = useMemo(() => selectedChains.slice().sort().join("|"), [selectedChains]);
+  const portfolioMetricsCacheKey = useMemo(
+    () => scopedSessionCacheKey(PORTFOLIO_METRICS_CACHE_PREFIX, [walletHash, selectedChainKey]),
+    [selectedChainKey, walletHash],
+  );
+  const baseTotalUsd = summary?.totalUsd ?? 0;
+  const totalUsd = baseTotalUsd + solanaDefiTotals.totalValueUsd;
+  const netWorthComputing = wallets.length > 0 && (refreshing || solanaDefiTotals.loading);
+  const syncValueLoading = wallets.length > 0 && totalUsd === 0 && netWorthComputing;
   const chartDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, period),
-    [history?.points, summary?.totalUsd, period],
+    () => computePeriodDelta(history?.points ?? [], period),
+    [history?.points, period],
+  );
+  const heroHistoryDelta = useMemo(
+    () => computePeriodDelta(history?.points ?? [], "24h"),
+    [history?.points],
+  );
+  const solanaSpotUsd = useMemo(
+    () => sumAllocationForNetwork(summary?.allocations ?? [], "solana"),
+    [summary?.allocations],
   );
   const heroDelta = useMemo(
-    () => computePeriodDelta(history?.points ?? [], summary?.totalUsd ?? 0, "24h"),
-    [history?.points, summary?.totalUsd],
+    () =>
+      computeHeroDelta(totalUsd, heroHistoryDelta, portfolioSnapshotPair.prev, {
+        solanaSpotUsd,
+        unreportedDefiUsd: solanaDefiTotals.snapshottedValueUsd,
+        reportedDefiChange24hUsd: solanaDefiTotals.reportedChange24hUsd,
+      }),
+    [
+      heroHistoryDelta,
+      portfolioSnapshotPair.prev,
+      solanaDefiTotals.reportedChange24hUsd,
+      solanaDefiTotals.snapshottedValueUsd,
+      solanaSpotUsd,
+      totalUsd,
+    ],
   );
   const chartPoints = useMemo(
-    () => buildChartPoints(history?.points ?? [], summary?.totalUsd ?? null, period),
-    [history?.points, summary?.totalUsd, period],
+    () => buildChartPoints(
+      history?.points ?? [],
+      null,
+      period,
+    ),
+    [history?.points, period],
   );
   const walletAllocationRows = useMemo(
-    () => buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets),
-    [summary?.walletAllocations, wallets],
+    () => buildWalletAllocationRows(summary?.walletAllocations ?? [], wallets, solanaDefiTotals.walletValues),
+    [summary?.walletAllocations, wallets, solanaDefiTotals.walletValues],
+  );
+  const chainAllocationRows = useMemo(
+    () => buildChainAllocationRows(summary?.allocations ?? [], solanaDefiTotals.chainValues),
+    [summary?.allocations, solanaDefiTotals.chainValues],
+  );
+  const assetInventoryRows = useMemo(() => buildAssetInventoryRows(assets), [assets]);
+  const backendDefiTokenValues = useMemo(
+    () => buildBackendDefiTokenValues(defiPositions.length > 0 ? defiPositions : positions),
+    [defiPositions, positions],
+  );
+  const defiTokenValues = useMemo(
+    () => mergeValueMaps(backendDefiTokenValues, solanaDefiTotals.tokenValues),
+    [backendDefiTokenValues, solanaDefiTotals.tokenValues],
+  );
+  const tokenAllocationRows = useMemo(
+    () => buildTokenAllocationRows(assets, defiTokenValues),
+    [assets, defiTokenValues],
   );
   const allocationRows = useMemo(
     () =>
       allocationMode === "token"
-        ? groupAllocationsByToken(assets)
+        ? tokenAllocationRows
         : allocationMode === "wallet"
           ? walletAllocationRows
-          : summary?.allocations ?? [],
-    [allocationMode, assets, summary?.allocations, walletAllocationRows],
+          : chainAllocationRows,
+    [allocationMode, chainAllocationRows, tokenAllocationRows, walletAllocationRows],
   );
   const allocationChartRows = useMemo(
     () => buildAllocationChartRows(allocationRows, totalUsd),
@@ -163,12 +286,16 @@ export function Dashboard() {
       allocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? allocationChartRows[0] ?? null,
     [allocationChartRows, hoveredAllocationKey],
   );
-  const overviewLegendRows = useMemo(() => allocationChartRows, [allocationChartRows]);
-  const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
-  const activity = useMemo(
-    () => buildActivity(wallets, history?.points ?? [], lastRefresh, summary?.totalUsd ?? null),
-    [wallets, history?.points, lastRefresh, summary?.totalUsd],
+  const summaryAllocationChartRows = useMemo(
+    () => buildAllocationChartRows(allocationRows, totalUsd),
+    [allocationRows, totalUsd],
   );
+  const summaryActiveAllocationRow = useMemo(
+    () =>
+      summaryAllocationChartRows.find((row) => allocationRowKey(row) === hoveredAllocationKey) ?? summaryAllocationChartRows[0] ?? null,
+    [summaryAllocationChartRows, hoveredAllocationKey],
+  );
+  const allocationMeta = useMemo(() => allocationModeMeta(allocationMode), [allocationMode]);
   const activeDefiPositions = useMemo(
     () => (defiPositions.length > 0 ? defiPositions : positions),
     [defiPositions, positions],
@@ -181,6 +308,23 @@ export function Dashboard() {
 
   async function handleRefresh(manual = true) {
     if (wallets.length === 0) {
+      setSummary(null);
+      setHistory(null);
+      setBenchmarks(null);
+      setPortfolioMetrics(null);
+      setMetricsLoading(false);
+      setHistoryLoading(false);
+      setBenchmarkLoading(false);
+      setMetricsPartial(false);
+      setHistoryPartial(false);
+      setBenchmarkPartial(false);
+      setAssets([]);
+      setPositions([]);
+      setDefiPositions([]);
+      setPositionSummary(null);
+      setDefiSummary(null);
+      setSolanaDefiTotals(EMPTY_SOLANA_DEFI_TOTALS);
+      setError(null);
       return;
     }
     setRefreshing(true);
@@ -193,7 +337,11 @@ export function Dashboard() {
       setDefiPositions(data.defiPositions);
       setPositionSummary(data.positionSummary ?? null);
       setDefiSummary(data.defiSummary ?? null);
-      setHistoryWarning(null);
+      if (manual) {
+        clearSessionCache(portfolioMetricsCacheKey);
+        setPortfolioMetrics(null);
+        setMetricsPartial(false);
+      }
 
       const refreshTime = new Date().toISOString();
       setLastRefresh(refreshTime);
@@ -210,35 +358,71 @@ export function Dashboard() {
 
   async function handleAddWallet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalized = normalizeAddress(inputAddress);
+    const entries = parseWalletInput(inputAddress);
 
-    if (!isValidEvmAddress(normalized)) {
-      setError("Please enter a valid EVM address.");
+    if (entries.length === 0) {
+      setError("Please enter at least one EVM or Solana address.");
       return;
     }
 
-    const existingWallet = wallets.find((wallet) => wallet.normalizedAddress === normalized);
-    if (existingWallet) {
-      setDuplicateAddress(normalized);
-      setActiveWallet(normalized);
+    const invalidEntries = entries.filter((entry) => !isValidWalletAddress(entry));
+    if (invalidEntries.length > 0) {
+      setError(`Invalid wallet address${invalidEntries.length > 1 ? "es" : ""}: ${invalidEntries.slice(0, 3).join(", ")}.`);
+      return;
+    }
+
+    const existingAddresses = new Set(wallets.map((wallet) => wallet.normalizedAddress));
+    const batchAddresses = new Set<string>();
+    const nextWallets: WalletRecord[] = [];
+    let duplicateCount = 0;
+
+    for (const entry of entries) {
+      const normalized = normalizeAddress(entry);
+      if (existingAddresses.has(normalized) || batchAddresses.has(normalized)) {
+        duplicateCount++;
+        continue;
+      }
+
+      batchAddresses.add(normalized);
+      nextWallets.push({
+        normalizedAddress: normalized,
+        originalInput: entry,
+        label: inputLabel.trim(),
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    if (nextWallets.length === 0) {
+      const firstDuplicate = entries.map(normalizeAddress).find((address) => existingAddresses.has(address)) ?? null;
+      setDuplicateAddress(firstDuplicate);
+      setActiveWallet(firstDuplicate);
       setError("Wallet already added. Opened the existing entry.");
       return;
     }
 
-    const nextWallet: WalletRecord = {
-      normalizedAddress: normalized,
-      originalInput: inputAddress.trim(),
-      label: inputLabel.trim(),
-      createdAt: new Date().toISOString(),
-    };
-
-    await saveWallet(nextWallet);
-    setWallets((current) => [...current, nextWallet]);
+    await Promise.all(nextWallets.map((wallet) => saveWallet(wallet)));
+    const addedSolanaWallet = nextWallets.some((wallet) => isValidSolanaAddress(wallet.normalizedAddress));
+    if (addedSolanaWallet && chains.some((chain) => chain.id === "solana") && !selectedChains.includes("solana")) {
+      const nextSelection = [...selectedChains, "solana"];
+      setSelectedChains(nextSelection);
+      await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
+    }
+    setHistory(null);
+    setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
+    setWallets((current) => [...current, ...nextWallets]);
     setInputAddress("");
     setInputLabel("");
     setDuplicateAddress(null);
-    setActiveWallet(normalized);
-    setError(null);
+    setActiveWallet(nextWallets[nextWallets.length - 1].normalizedAddress);
+    setError(
+      duplicateCount > 0
+        ? `${nextWallets.length} wallet${nextWallets.length > 1 ? "s" : ""} added. ${duplicateCount} duplicate${duplicateCount > 1 ? "s" : ""} skipped.`
+        : null,
+    );
   }
 
   async function handleRemoveWallet(address: string) {
@@ -247,11 +431,17 @@ export function Dashboard() {
     setActiveWallet(null);
     setSummary(null);
     setHistory(null);
+    setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
     setAssets([]);
     setPositions([]);
     setDefiPositions([]);
     setPositionSummary(null);
     setDefiSummary(null);
+    setSolanaDefiTotals(EMPTY_SOLANA_DEFI_TOTALS);
   }
 
   async function toggleChain(chainId: string) {
@@ -261,41 +451,191 @@ export function Dashboard() {
     if (nextSelection.length === 0) {
       return;
     }
+    setHistory(null);
+    setBenchmarks(null);
+    setPortfolioMetrics(null);
+    setMetricsPartial(false);
+    setHistoryPartial(false);
+    setBenchmarkPartial(false);
     setSelectedChains(nextSelection);
     await setMeta(SELECTED_CHAINS_KEY, nextSelection.join(","));
   }
+
+  useEffect(() => {
+    if (!walletHash) {
+      setPortfolioSnapshotPair({ today: null, prev: null });
+      return;
+    }
+    let active = true;
+    void readPortfolioSnapshotPair(walletHash).then((pair) => {
+      if (active) {
+        setPortfolioSnapshotPair(pair);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [walletHash]);
+
+  useEffect(() => {
+    if (
+      !walletHash ||
+      wallets.length === 0 ||
+      refreshing ||
+      solanaDefiTotals.loading ||
+      summary === null ||
+      totalUsd <= 0
+    ) {
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (
+      portfolioSnapshotPair.today?.date === today &&
+      portfolioSnapshotPair.today.totalUsd === totalUsd &&
+      portfolioSnapshotPair.today.solanaSpotUsd === solanaSpotUsd &&
+      portfolioSnapshotPair.today.unreportedDefiUsd === solanaDefiTotals.snapshottedValueUsd
+    ) {
+      return;
+    }
+    let active = true;
+    void recordPortfolioSnapshot(walletHash, today, {
+      totalUsd,
+      solanaSpotUsd,
+      unreportedDefiUsd: solanaDefiTotals.snapshottedValueUsd,
+    }).then((pair) => {
+      if (active) {
+        setPortfolioSnapshotPair(pair);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    walletHash,
+    wallets.length,
+    refreshing,
+    solanaDefiTotals.loading,
+    solanaDefiTotals.snapshottedValueUsd,
+    solanaSpotUsd,
+    totalUsd,
+    summary,
+    portfolioSnapshotPair,
+  ]);
 
   useEffect(() => {
     if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
       return;
     }
 
+    let active = true;
+    const cachedMetrics = readSessionCache<PortfolioMetricsResponse>(
+      portfolioMetricsCacheKey,
+      PORTFOLIO_METRICS_CACHE_TTL_MS,
+    );
+    if (cachedMetrics) {
+      setPortfolioMetrics(cachedMetrics);
+      setMetricsPartial(false);
+      setMetricsLoading(false);
+      return;
+    }
+
+    setMetricsLoading(true);
+    setMetricsPartial(false);
+
+    fetchPortfolioMetrics(wallets, selectedChains)
+      .then((response) => {
+        if (active) {
+          setPortfolioMetrics(response);
+          writeSessionCache(portfolioMetricsCacheKey, response);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setPortfolioMetrics(null);
+          setMetricsPartial(true);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setMetricsLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains, portfolioMetricsCacheKey]);
+
+  useEffect(() => {
+    if (loading || wallets.length === 0 || selectedChains.length === 0 || summary === null) {
+      return;
+    }
+
+    let active = true;
     const loadHistory = async () => {
+      setHistoryLoading(true);
+      setBenchmarkLoading(false);
+      setHistoryPartial(false);
+      setBenchmarkPartial(false);
       try {
         const response = await fetchPortfolioHistory(wallets, selectedChains, "30d");
+        if (!active) {
+          return;
+        }
         setHistory(response);
-        setHistoryWarning(
-          response.partial
-            ? `History is partial. Missing chains: ${response.missingChains.join(", ")}.`
-            : null,
-        );
-      } catch (historyError) {
-        setHistory(null);
-        setHistoryWarning(historyError instanceof Error ? historyError.message : "Failed to load history");
+        const startTimestamp = historyStartTimestamp(response.points);
+        if (startTimestamp === null) {
+          setBenchmarks(null);
+          setBenchmarkPartial(true);
+          return;
+        }
+        try {
+          setBenchmarkLoading(true);
+          const benchmarkResponse = await fetchPortfolioBenchmarks(startTimestamp);
+          if (active) {
+            setBenchmarks(benchmarkResponse);
+          }
+        } catch {
+          if (active) {
+            setBenchmarks(null);
+            setBenchmarkPartial(true);
+          }
+        } finally {
+          if (active) {
+            setBenchmarkLoading(false);
+          }
+        }
+      } catch {
+        if (active) {
+          setHistory(null);
+          setBenchmarks(null);
+          setHistoryPartial(true);
+          setBenchmarkPartial(true);
+        }
+      } finally {
+        if (active) {
+          setHistoryLoading(false);
+        }
       }
     };
 
     void loadHistory();
-  }, [loading, period, selectedChains, summary, wallets]);
+
+    return () => {
+      active = false;
+    };
+  }, [loading, walletHash, selectedChainKey, summary, wallets, selectedChains]);
 
   if (loading) {
     return (
       <div className="s-layout">
         <header className="s-topbar">
-          <span className="s-brand">P&amp;L_TERMINAL_V3</span>
+          <a className="s-brand" href="/" aria-label="P&L Terminal">
+            <img className="s-brand-logo" src="/logo.png" alt="P&L Terminal" />
+          </a>
         </header>
         <div className="s-loading">
-          <p className="s-kicker">INITIALIZING_TERMINAL</p>
+          <p className="s-kicker">INITIALIZING TERMINAL</p>
           <p className="s-loading-msg">Loading local vault, scope matrix, and portfolio state...</p>
         </div>
         <footer className="s-footer">
@@ -305,13 +645,13 @@ export function Dashboard() {
     );
   }
 
-  const topNetwork = summary?.allocations[0]?.displayName ?? "—";
+  const topNetwork = chainAllocationRows[0]?.displayName ?? "—";
   const topWallet = walletAllocationRows[0]?.displayName ?? "—";
   const scopeLabel =
     chains.length === 0
       ? "Loading scope"
       : selectedChains.length === chains.length
-        ? `All ${chains.length} EVM networks`
+        ? `All ${chains.length} networks`
         : `${selectedChains.length}/${chains.length} networks`;
 
   return (
@@ -320,58 +660,63 @@ export function Dashboard() {
       {/* ── TOP NAVBAR ─────────────────────────────────────────────── */}
       <header className="s-topbar">
         <div className="s-topbar-left">
-          <span className="s-brand">P&amp;L_TERMINAL_V3</span>
+          <a className="s-brand" href="/" aria-label="P&L Terminal">
+            <img className="s-brand-logo" src="/logo.png" alt="P&L Terminal" />
+          </a>
           <nav className="s-topnav">
-            <span className="s-topnav-active">LIVE_SYNC</span>
-            <span className="s-topnav-link">{scopeLabel.toUpperCase().replace(/ /g, "_")}</span>
+            <span className="s-topnav-active">{activeView === "risk-engine" ? "RISK ENGINE" : "LIVE SYNC"}</span>
+            <span className="s-topnav-link">{scopeLabel.toUpperCase()}</span>
           </nav>
         </div>
         <div className="s-topbar-right">
-          <span className="s-topbar-meta mono">{walletHash ? shortHash(walletHash) : "NO_HASH"}</span>
+          <span className="s-topbar-meta mono">{walletHash ? shortHash(walletHash) : "NO HASH"}</span>
           <button
             className="s-btn-primary"
             type="button"
             onClick={() => void handleRefresh(true)}
             disabled={refreshing || wallets.length === 0}
           >
-            {refreshing ? "SYNCING..." : "SYNC_LIVE"}
+            {refreshing ? "SYNCING..." : "SYNC LIVE"}
           </button>
-          <span className="s-btn-outline s-btn-sm">AUTHORIZE_PRIVATE</span>
+          <span className="s-btn-outline s-btn-sm">AUTHORIZE PRIVATE</span>
         </div>
       </header>
 
       {/* ── LEFT SIDEBAR ───────────────────────────────────────────── */}
       <aside className="s-sidebar">
 
-        {/* User block */}
-        <div className="s-sidebar-user">
-          <div className="s-sidebar-avatar">P</div>
-          <div>
-            <p className="s-sidebar-name">OPERATOR_01</p>
-            <p className="s-sidebar-level">LEVEL_3_AUTH</p>
-          </div>
-        </div>
-
         {/* Nav */}
         <nav className="s-sidenav">
-          <a className="s-sidenav-item s-sidenav-active">DASHBOARD</a>
-          <a className="s-sidenav-item">ANALYTICS</a>
-          <a className="s-sidenav-item">NETWORK_EXPOSURE</a>
-          <a className="s-sidenav-item">ASSET_INVENTORY</a>
-          <a className="s-sidenav-item">RISK_ENGINE</a>
+          <button
+            className={`s-sidenav-item ${activeView === "dashboard" ? "s-sidenav-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("dashboard")}
+          >
+            DASHBOARD
+          </button>
+          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ANALYTICS</button>
+          <button className="s-sidenav-item" type="button" onClick={() => setActiveView("dashboard")}>ASSET INVENTORY</button>
+          <button
+            className={`s-sidenav-item ${activeView === "risk-engine" ? "s-sidenav-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("risk-engine")}
+          >
+            RISK ENGINE
+          </button>
         </nav>
 
         {/* Wallet intake */}
         <div className="s-sidebar-section">
-          <div className="s-sidebar-section-hd">WALLET_INTAKE</div>
+          <div className="s-sidebar-section-hd">WALLET INTAKE</div>
           <form className="s-form" onSubmit={handleAddWallet}>
             <label className="s-field">
-              <span className="s-field-label">ADDRESS</span>
-              <input
-                className="s-input"
+              <span className="s-field-label">ADDRESSES</span>
+              <textarea
+                className="s-input s-wallet-address-input"
                 value={inputAddress}
                 onChange={(e) => setInputAddress(e.target.value)}
-                placeholder="0x..."
+                placeholder="0x... / Solana address, one per line"
+                rows={4}
               />
             </label>
             <label className="s-field">
@@ -383,7 +728,7 @@ export function Dashboard() {
                 placeholder="Main / trading / treasury"
               />
             </label>
-            <button className="s-btn-outline" type="submit">REGISTER_WALLET</button>
+            <button className="s-btn-outline" type="submit">REGISTER WALLETS</button>
           </form>
           {error ? <p className="s-error">{error}</p> : null}
         </div>
@@ -392,7 +737,7 @@ export function Dashboard() {
         {wallets.length > 0 && (
           <div className="s-sidebar-section">
             <div className="s-sidebar-section-hd">
-              <span>TRACKED_WALLETS</span>
+              <span>TRACKED WALLETS</span>
               <span className="s-badge">{wallets.length}</span>
             </div>
             <div className="s-wallet-list">
@@ -422,7 +767,7 @@ export function Dashboard() {
         {/* Network scope */}
         <div className="s-sidebar-section">
           <div className="s-sidebar-section-hd">
-            <span>NETWORK_SCOPE</span>
+            <span>NETWORK SCOPE</span>
             <span className="s-badge">{selectedChains.length}</span>
           </div>
           <div className="s-chain-grid">
@@ -447,12 +792,10 @@ export function Dashboard() {
             onClick={() => void handleRefresh(true)}
             disabled={refreshing || wallets.length === 0}
           >
-            {refreshing ? "SYNCING..." : "EXECUTE_SYNC"}
+            {refreshing ? "SYNCING..." : "EXECUTE SYNC"}
           </button>
           <div className="s-sidebar-sys">
-            <span className="s-sys-line">PROVIDERS: ALCHEMY + GOLDRUSH</span>
-            <span className="s-sys-line">STORAGE: SQLITE + INDEXEDDB</span>
-            <span className="s-sys-line">LAST_SYNC: {formatRelativeTime(lastRefresh).toUpperCase()}</span>
+            <span className="s-sys-line">LAST SYNC: {formatRelativeTime(lastRefresh).toUpperCase()}</span>
           </div>
         </div>
       </aside>
@@ -464,24 +807,54 @@ export function Dashboard() {
 
           /* Empty state */
           <div className="s-empty">
-            <p className="s-kicker">NO_ACTIVE_PORTFOLIO</p>
+            <p className="s-kicker">NO ACTIVE PORTFOLIO</p>
             <h2 className="s-empty-title">Register wallets to begin tracking.</h2>
             <div className="s-empty-steps">
-              <div className="s-empty-step"><span>01</span><strong>WALLET_INTAKE</strong><p>Add addresses in the left command rail.</p></div>
-              <div className="s-empty-step"><span>02</span><strong>SCOPE_MATRIX</strong><p>Limit the networks you want queried.</p></div>
-              <div className="s-empty-step"><span>03</span><strong>EXECUTE_SYNC</strong><p>Refresh will hydrate and persist the first checkpoints.</p></div>
+              <div className="s-empty-step"><span>01</span><strong>WALLET INTAKE</strong><p>Add addresses in the left command rail.</p></div>
+              <div className="s-empty-step"><span>02</span><strong>SCOPE MATRIX</strong><p>Limit the networks you want queried.</p></div>
+              <div className="s-empty-step"><span>03</span><strong>EXECUTE SYNC</strong><p>Refresh will hydrate and persist the first checkpoints.</p></div>
             </div>
           </div>
 
+        ) : activeView === "risk-engine" ? (
+          <RiskEngineView
+            wallets={wallets}
+            chains={selectedChains}
+            portfolioTotalUsd={totalUsd}
+            defiExposureUsd={solanaDefiTotals.protocolExposureUsd}
+            defiPositionCount={solanaDefiTotals.protocolPositionCount}
+            defiLoading={solanaDefiTotals.loading}
+            defiPositions={defiPositions}
+            protocolValues={solanaDefiTotals.protocolValues}
+            protocolPositionCounts={solanaDefiTotals.protocolPositionCounts}
+            metrics={portfolioMetrics}
+            history={history}
+            benchmarks={benchmarks}
+            metricsLoading={metricsLoading}
+            historyLoading={historyLoading}
+            benchmarkLoading={benchmarkLoading}
+            metricsPartial={metricsPartial}
+            historyPartial={historyPartial}
+            benchmarkPartial={benchmarkPartial}
+            refreshing={refreshing}
+            lastRefresh={lastRefresh}
+            onRefresh={() => void handleRefresh(true)}
+          />
         ) : (
           <>
             {/* ── HERO: Total Net Worth ───────────────────────────────── */}
             <section className="s-hero">
-              <p className="s-kicker">TOTAL_NET_WORTH</p>
+              <p className="s-kicker">TOTAL NET WORTH</p>
               <div className="s-hero-row">
-                <h1 className="s-hero-value">{formatCurrency(totalUsd)}</h1>
+                <h1 className="s-hero-value">
+                  {syncValueLoading ? (
+                    <SyncValueLoader label="SYNCING VALUE" />
+                  ) : (
+                    <NetWorthValue value={totalUsd} loading={netWorthComputing} />
+                  )}
+                </h1>
                 {heroDelta.amount !== null && (
-                  <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`}>
+                  <div className={`s-delta-badge ${toneClass(heroDelta.amount)}`} title={heroDelta.label}>
                     <span className="s-delta-pct">{formatPercent(heroDelta.percentage)}</span>
                     <span className="s-delta-amt mono">{formatCurrency(heroDelta.amount)}</span>
                   </div>
@@ -499,13 +872,21 @@ export function Dashboard() {
             {/* ── WALLET INDEX BAR ───────────────────────────────────── */}
             <section className="s-wallet-bar">
               <div className="s-wallet-bar-label">
-                <span>{wallets.length}_TRACKED_WALLETS</span>
+                <span>{wallets.length} TRACKED WALLETS</span>
               </div>
               <div className="s-wallet-chips">
                 {wallets.map((wallet, i) => (
                   <div key={wallet.normalizedAddress} className="s-wallet-chip">
                     <div className="s-wallet-chip-dot" style={{ background: SWATCHES[i % SWATCHES.length] }} />
                     <span className="mono">{wallet.label || shortAddress(wallet.originalInput)}</span>
+                    <button
+                      className="s-wallet-chip-remove"
+                      type="button"
+                      aria-label={`Remove ${wallet.label || shortAddress(wallet.originalInput)}`}
+                      onClick={() => void handleRemoveWallet(wallet.normalizedAddress)}
+                    >
+                      x
+                    </button>
                   </div>
                 ))}
                 <button className="s-wallet-chip-add" type="button">+</button>
@@ -521,9 +902,29 @@ export function Dashboard() {
                 {/* Performance Chart */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>TECHNICAL_PERFORMANCE_SNAPSHOT</span>
+                    <span>PORTFOLIO PERFORMANCE HISTORY</span>
                     <div className="s-panel-hd-controls">
-                      <span className="s-live-badge">REALTIME_FEED</span>
+                      <div className="chart-series-toggles">
+                        <button
+                          className={`chart-legend-btn ${visibleBenchmarks.bitcoin ? "is-active" : ""}`}
+                          type="button"
+                          disabled={!benchmarks?.bitcoin?.length}
+                          onClick={() => setVisibleBenchmarks((c) => ({ ...c, bitcoin: !c.bitcoin }))}
+                        >
+                          <span className="chart-legend-dot" style={{ backgroundColor: "#F7931A" }} />
+                          BTC
+                        </button>
+                        <button
+                          className={`chart-legend-btn ${visibleBenchmarks.solana ? "is-active" : ""}`}
+                          type="button"
+                          disabled={!benchmarks?.solana?.length}
+                          onClick={() => setVisibleBenchmarks((c) => ({ ...c, solana: !c.solana }))}
+                        >
+                          <span className="chart-legend-dot" style={{ backgroundColor: "#9945FF" }} />
+                          SOL
+                        </button>
+                      </div>
+                      <span className="s-live-badge">CURRENT SCOPE</span>
                       <div className="s-seg-group">
                         {PERIODS.map((value) => (
                           <button
@@ -539,15 +940,19 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-body">
-                    <Chart points={chartPoints} />
-                    {historyWarning ? <p className="s-warning">{historyWarning}</p> : null}
+                    <Chart
+                      points={chartPoints}
+                      benchmarks={benchmarks}
+                      visibleBenchmarks={visibleBenchmarks}
+                      loading={historyLoading}
+                    />
                   </div>
                 </div>
 
                 {/* Portfolio Command Summary */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>PORTFOLIO_COMMAND_SUMMARY</span>
+                    <span>PORTFOLIO SUMMARY</span>
                     <div className="s-seg-group">
                       <button
                         className={`s-seg-btn ${overviewAllocationView === "strip" ? "is-active" : ""}`}
@@ -562,21 +967,24 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="s-panel-tabs">
-                    <button className={`s-tab ${allocationMode === "token" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("token")}>BY_TOKEN</button>
-                    <button className={`s-tab ${allocationMode === "chain" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("chain")}>BY_NETWORK</button>
-                    <button className={`s-tab ${allocationMode === "wallet" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("wallet")}>BY_WALLET</button>
+                    <button className={`s-tab ${allocationMode === "token" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("token")}>BY TOKEN</button>
+                    <button className={`s-tab ${allocationMode === "chain" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("chain")}>BY NETWORK</button>
+                    <button className={`s-tab ${allocationMode === "wallet" ? "is-active" : ""}`} type="button" onClick={() => setAllocationMode("wallet")}>BY WALLET</button>
                   </div>
                   <div className="s-panel-body">
                     {overviewAllocationView === "ring" ? (
                       <div className="s-ring-layout">
-                        <div>
-                          <div className="s-mega">{formatCurrency(totalUsd)}</div>
-                          <div className={`s-delta-line ${toneClass(chartDelta.amount)}`}>
-                            {chartDelta.amount === null ? "Waiting for baseline" : `${formatCurrency(chartDelta.amount)} / ${formatPercent(chartDelta.percentage)}`}
+                        <div className="s-ring-total">
+                          <div className="s-mega">
+                            {syncValueLoading ? (
+                              <SyncValueLoader label="SYNCING VALUE" compact />
+                            ) : (
+                              <NetWorthValue value={totalUsd} loading={netWorthComputing} compact />
+                            )}
                           </div>
                         </div>
                         <AllocationDonutChart
-                          rows={allocationChartRows}
+                          rows={summaryAllocationChartRows}
                           mode={allocationMode}
                           activeKey={hoveredAllocationKey}
                           onActiveKeyChange={setHoveredAllocationKey}
@@ -585,9 +993,9 @@ export function Dashboard() {
                     ) : (
                       <>
                         <div className="s-alloc-strip" onMouseLeave={() => setHoveredAllocationKey(null)}>
-                          {allocationChartRows.map((row) => {
+                          {summaryAllocationChartRows.map((row) => {
                             const rowKey = allocationRowKey(row);
-                            const isActive = rowKey === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null);
+                            const isActive = rowKey === (summaryActiveAllocationRow ? allocationRowKey(summaryActiveAllocationRow) : null);
                             return (
                               <button
                                 key={rowKey}
@@ -603,10 +1011,10 @@ export function Dashboard() {
                           })}
                         </div>
                         <div className="s-alloc-legend">
-                          {overviewLegendRows.map((row) => (
+                          {summaryAllocationChartRows.map((row) => (
                             <div
                               key={allocationRowKey(row)}
-                              className={`s-alloc-legend-row ${allocationRowKey(row) === (activeAllocationRow ? allocationRowKey(activeAllocationRow) : null) ? "is-active" : ""}`}
+                              className={`s-alloc-legend-row ${allocationRowKey(row) === (summaryActiveAllocationRow ? allocationRowKey(summaryActiveAllocationRow) : null) ? "is-active" : ""}`}
                               onMouseEnter={() => setHoveredAllocationKey(allocationRowKey(row))}
                               onMouseLeave={() => setHoveredAllocationKey(null)}
                             >
@@ -622,20 +1030,34 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <DefiPositionsBlock wallets={wallets} />
+                <PortfolioMetricsBlock
+                  wallets={wallets}
+                  chains={selectedChains}
+                  portfolioTotalUsd={totalUsd}
+                  defiExposureUsd={solanaDefiTotals.protocolExposureUsd}
+                  defiPositionCount={solanaDefiTotals.protocolPositionCount}
+                  defiLoading={solanaDefiTotals.loading}
+                  providedMetrics={portfolioMetrics}
+                  providedLoading={metricsLoading}
+                  providedPartial={metricsPartial}
+                />
+
+                <AiAdvisorBlock wallets={wallets} chains={selectedChains} />
+
+                <DefiPositionsBlock wallets={wallets} onSolanaTotalsChange={setSolanaDefiTotals} />
 
                 {/* Asset Inventory */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>ASSET_INVENTORY_TOP_{assets.length}</span>
-                    <span className="s-badge">{assets.length} ROWS</span>
+                    <span>ASSET INVENTORY TOP {assetInventoryRows.length}</span>
+                    <span className="s-badge">{assetInventoryRows.length} ROWS</span>
                   </div>
                   <div className="s-table-shell">
                     <table className="s-table">
                       <thead>
                         <tr>
                           <th>ASSET</th>
-                          <th>VENUE</th>
+                          <th>NETWORK</th>
                           <th>TYPE</th>
                           <th className="align-right">BALANCE</th>
                           <th className="align-right">PRICE</th>
@@ -644,8 +1066,8 @@ export function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {assets.map((asset) => (
-                          <tr key={asset.assetId}>
+                        {assetInventoryRows.map((asset) => (
+                          <tr key={asset.key}>
                             <td data-label="Asset">
                               <div className="s-asset-cell">
                                 <div className="s-asset-icon">{asset.symbol.slice(0, 1)}</div>
@@ -655,8 +1077,10 @@ export function Dashboard() {
                                 </div>
                               </div>
                             </td>
-                            <td data-label="Venue"><span className="s-tag">{displayNetwork(asset.network)}</span></td>
-                            <td data-label="Type"><span className="s-tag">{asset.network === "hyperliquid" ? "VENUE" : asset.nativeToken ? "NATIVE" : "ERC-20"}</span></td>
+                            <td data-label="Network">
+                              <NetworkBreakdownTag asset={asset} />
+                            </td>
+                            <td data-label="Type"><span className="s-tag">{asset.typeLabel}</span></td>
                             <td data-label="Balance" className="align-right mono">{formatQuantity(asset.quantity)}</td>
                             <td data-label="Price" className="align-right mono">{formatCurrency(asset.priceUsd)}</td>
                             <td data-label="Value" className="align-right mono s-bold">{formatCurrency(asset.valueUsd)}</td>
@@ -673,43 +1097,50 @@ export function Dashboard() {
               {/* RIGHT COLUMN (exposure + allocation + readout) */}
               <div className="s-col-side">
 
-              {/* Network Exposure Board */}
                 <div className="s-panel">
                   <div className="s-panel-hd s-panel-hd-blue">
-                    <span>NETWORK_EXPOSURE_BOARD</span>
+                    <span>NETWORK EXPOSURE</span>
+                    <div className="s-panel-hd-controls">
+                      <span className="s-badge mono">TOP {Math.min(chainAllocationRows.length, 6)}/{chainAllocationRows.length}</span>
+                    </div>
                   </div>
                   <div className="s-panel-body s-exposure-list">
-                    {(summary?.allocations ?? []).slice(0, 6).map((item, i) => (
-                      <div key={item.network} className="s-exposure-row">
-                        <div className="s-exposure-meta">
-                          <span className="s-exposure-name">{item.displayName.toUpperCase()}</span>
-                          <span className="mono s-exposure-pct">{formatShare(shareOf(item.valueUsd, totalUsd))}</span>
+                    {chainAllocationRows.slice(0, 6).map((item, i) => {
+                      const share = shareOf(item.valueUsd, totalUsd);
+                      return (
+                        <div key={item.network} className="s-exposure-row" title={`${item.displayName}: ${formatCurrency(item.valueUsd)}`}>
+                          <div className="s-exposure-meta">
+                            <span className="s-exposure-name">{item.displayName.toUpperCase()}</span>
+                            <span className="mono s-exposure-pct">{formatShare(share)}</span>
+                          </div>
+                          <div className="s-bar-track">
+                            <div
+                              className="s-bar-fill"
+                              style={{
+                                width: `${Math.max(share, 0.5)}%`,
+                                backgroundColor: SWATCHES[i % SWATCHES.length],
+                              }}
+                            />
+                          </div>
                         </div>
-                        <div className="s-bar-track">
-                          <div
-                            className="s-bar-fill"
-                            style={{
-                              width: `${shareOf(item.valueUsd, totalUsd)}%`,
-                              backgroundColor: SWATCHES[i % SWATCHES.length],
-                            }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
                 {/* Allocation Detail */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>ALLOCATION_DETAIL</span>
-                    <span className="s-badge">{allocationMeta.label.toUpperCase()}</span>
+                    <span>ALLOCATION DETAIL</span>
+                    <div className="s-panel-hd-controls">
+                      <span className="s-badge">{allocationMeta.label.toUpperCase()}</span>
+                      <span className="s-badge mono">TOP {allocationChartRows.length}/{allocationRows.length}</span>
+                    </div>
                   </div>
                   <div className="s-panel-body">
                     <AllocationDetailList
                       rows={allocationChartRows}
                       mode={allocationMode}
-                      totalRows={allocationRows.length}
                       activeKey={activeAllocationRow ? allocationRowKey(activeAllocationRow) : null}
                       onActiveKeyChange={setHoveredAllocationKey}
                     />
@@ -719,69 +1150,30 @@ export function Dashboard() {
                 {/* System Readout */}
                 <div className="s-panel">
                   <div className="s-panel-hd">
-                    <span>SYSTEM_READOUT</span>
+                    <span>SYSTEM READOUT</span>
                     <span className="s-badge">SERVER</span>
                   </div>
                   <div className="s-panel-body s-readout-list">
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_VENUE</span>
+                      <span className="s-readout-label">TOP NETWORK</span>
                       <strong className="s-readout-val">{topNetwork}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_WALLET</span>
+                      <span className="s-readout-label">TOP WALLET</span>
                       <strong className="s-readout-val">{topWallet}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">TOP_ASSET</span>
-                      <strong className="s-readout-val">{assets[0]?.symbol ?? "—"}</strong>
+                      <span className="s-readout-label">TOP ASSET</span>
+                      <strong className="s-readout-val">{assetInventoryRows[0]?.symbol ?? "N/A"}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">HISTORY_PTS</span>
-                      <strong className="s-readout-val mono">{history?.points.length ?? 0}</strong>
-                    </div>
-                    <div className="s-readout-row">
-                      <span className="s-readout-label">NETWORKS_SCOPE</span>
+                      <span className="s-readout-label">NETWORKS SCOPE</span>
                       <strong className="s-readout-val mono">{selectedChains.length}</strong>
                     </div>
                     <div className="s-readout-row">
-                      <span className="s-readout-label">DELTA_PERIOD</span>
+                      <span className="s-readout-label">DELTA PERIOD</span>
                       <strong className="s-readout-val mono">{chartDelta.label}</strong>
                     </div>
-                  </div>
-                </div>
-
-                {/* Ledger Activity */}
-                <div className="s-panel">
-                  <div className="s-panel-hd">
-                    <span>LEDGER_ACTIVITY</span>
-                    <span className="s-badge">{activity.length} EVENTS</span>
-                  </div>
-                  <div className="s-table-shell">
-                    <table className="s-table s-table-compact">
-                      <thead>
-                        <tr>
-                          <th>EVENT</th>
-                          <th>DETAIL</th>
-                          <th className="align-right">VALUE</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activity.map((item) => (
-                          <tr key={item.id}>
-                            <td data-label="Event">
-                              <div className="s-asset-cell">
-                                <strong>{item.kind}</strong>
-                                <span>{item.title}</span>
-                              </div>
-                            </td>
-                            <td data-label="Detail" className="s-muted">{item.detail}</td>
-                            <td data-label="Value" className={`align-right mono ${toneClass(item.valueUsd)}`}>
-                              {item.valueUsd === null ? "N/A" : formatCurrency(item.valueUsd)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
                   </div>
                 </div>
 
@@ -795,16 +1187,9 @@ export function Dashboard() {
       <footer className="s-footer">
         <div className="s-footer-left">
           <span className="s-dot" />
-          <span>SYSTEM_STABLE</span>
+          <span>SYSTEM STABLE</span>
           <span className="s-sep">|</span>
-          <span>{wallets.length}_TRACKED_WALLETS</span>
-          <span className="s-sep">|</span>
-          <span>LAST_BLOCK: #{Math.floor(Date.now() / 1000).toLocaleString()}</span>
-        </div>
-        <div className="s-footer-right">
-          <span>TERMINAL_SESSION: {walletHash ? shortHash(walletHash) : "NONE"}</span>
-          <span className="s-sep">|</span>
-          <span>P&amp;L_TERMINAL_V3</span>
+          <span>{wallets.length} TRACKED WALLETS</span>
         </div>
       </footer>
 
@@ -826,15 +1211,51 @@ function MetricTile({ label, value, tone }: { label: string; value: string; tone
   );
 }
 
-function Chart({ points }: { points: ChartPoint[] }) {
+function NetworkBreakdownTag({ asset }: { asset: AssetInventoryRow }) {
+  if (asset.networkBreakdown.length <= 1) {
+    return <span className="s-tag">{asset.networkLabel}</span>;
+  }
+
+  return (
+    <span className="s-network-breakdown-tag">
+      <span className="s-tag">{asset.networkLabel}</span>
+      <span className="s-network-breakdown-popover" role="tooltip">
+        <strong>{asset.symbol} NETWORK BREAKDOWN</strong>
+        {asset.networkBreakdown.map((item) => (
+          <span key={item.network} className="s-network-breakdown-row">
+            <span>{item.label}</span>
+            <span className="mono">{formatShare(item.share)}</span>
+            <span className="mono">{formatCurrency(item.valueUsd)}</span>
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+function Chart({ points, benchmarks, visibleBenchmarks, loading }: {
+  points: ChartPoint[];
+  benchmarks: BenchmarkData | null;
+  visibleBenchmarks: { bitcoin: boolean; solana: boolean };
+  loading: boolean;
+}) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{
     point: ChartPoint;
+    indexValue: number;
     x: number;
     y: number;
     width: number;
     height: number;
   } | null>(null);
+
+  if (points.length === 0 && loading) {
+    return (
+      <div className="chart-empty chart-loading">
+        <SyncValueLoader label="SYNCING DAILY CHECKPOINTS" compact />
+      </div>
+    );
+  }
 
   if (points.length === 0) {
     return <div className="chart-empty"><strong>No history in scope</strong><p>Refresh to hydrate the first server-side baseline.</p></div>;
@@ -843,10 +1264,19 @@ function Chart({ points }: { points: ChartPoint[] }) {
   const width = 820;
   const height = 248;
   const padLeft = 84;
-  const padRight = 18;
-  const padTop = 14;
+  const padRight = 52;
+  const padTop = 28;
   const padBottom = 34;
-  const values = points.map((point) => point.value);
+  const firstPortfolioValue = points[0]?.value ?? 1;
+  const portfolioSeries = buildPortfolioIndexSeries(points);
+  const bitcoinSeries = benchmarks ? buildBenchmarkSeries(benchmarks.bitcoin, points) : [];
+  const solanaSeries = benchmarks ? buildBenchmarkSeries(benchmarks.solana, points) : [];
+  const visibleIndexValues = [
+    ...portfolioSeries.map((point) => point.indexValue),
+    ...(visibleBenchmarks.bitcoin ? bitcoinSeries.map((point) => point.indexValue) : []),
+    ...(visibleBenchmarks.solana ? solanaSeries.map((point) => point.indexValue) : []),
+  ];
+  const values = visibleIndexValues.length > 0 ? visibleIndexValues : portfolioSeries.map((point) => point.indexValue);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const padding = min === max
@@ -865,11 +1295,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
       value,
     };
   });
-  const coords = points.map((point, index) => {
-    const x = points.length === 1 ? (padLeft + width - padRight) / 2 : padLeft + (index * (width - padLeft - padRight)) / Math.max(1, points.length - 1);
-    const y = height - padBottom - ((point.value - floor) / range) * (height - padTop - padBottom);
-    return { ...point, x, y };
-  });
+  const coords = portfolioSeries.map((point, index) => toChartCoord(point, index, portfolioSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
+  const bitcoinCoords = bitcoinSeries.map((point, index) => toChartCoord(point, index, bitcoinSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
+  const solanaCoords = solanaSeries.map((point, index) => toChartCoord(point, index, solanaSeries.length, padLeft, padRight, padTop, padBottom, width, height, floor, range));
   const interactiveCoords = coords.map((point, index) => {
     const previousX = index === 0 ? padLeft : (coords[index - 1].x + point.x) / 2;
     const nextX = index === coords.length - 1 ? width - padRight : (point.x + coords[index + 1].x) / 2;
@@ -879,7 +1307,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
       hitWidth: Math.max(nextX - previousX, 18),
     };
   });
-  const linePath = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  const linePath = buildSvgPath(coords);
+  const bitcoinPath = buildSvgPath(bitcoinCoords);
+  const solanaPath = buildSvgPath(solanaCoords);
   const areaPath = `${linePath} L ${coords[coords.length - 1].x.toFixed(2)} ${(height - padBottom).toFixed(2)} L ${coords[0].x.toFixed(2)} ${(height - padBottom).toFixed(2)} Z`;
   const step = Math.max(1, Math.ceil(points.length / 5));
 
@@ -890,8 +1320,9 @@ function Chart({ points }: { points: ChartPoint[] }) {
     }
     setHoveredPoint({
       point,
+      indexValue: point.indexValue,
       x: (point.x / width) * rect.width,
-      y: (point.y / height) * rect.height,
+        y: (point.y / height) * rect.height,
       width: rect.width,
       height: rect.height,
     });
@@ -917,13 +1348,19 @@ function Chart({ points }: { points: ChartPoint[] }) {
             <g key={tick.key}>
               <line x1={padLeft} y1={tick.y} x2={width - padRight} y2={tick.y} className="chart-grid-line" />
               <text x={padLeft - 10} y={tick.y + 4} textAnchor="end" className="chart-axis-label">
-                {formatAxisCurrency(tick.value)}
+                {formatAxisCurrency((tick.value / 100) * firstPortfolioValue)}
+              </text>
+              <text x={width - padRight + 8} y={tick.y + 4} textAnchor="start" className="chart-axis-label chart-axis-label-idx">
+                {tick.value.toFixed(0)}
               </text>
             </g>
           );
         })}
+        <line x1={width - padRight} y1={padTop} x2={width - padRight} y2={height - padBottom} className="chart-axis-line" />
         <path d={areaPath} className="chart-area" />
-        <path d={linePath} className={`chart-line ${coords[coords.length - 1].value >= coords[0].value ? "is-up" : "is-down"}`} />
+        {visibleBenchmarks.bitcoin && bitcoinPath ? <path d={bitcoinPath} className="chart-line is-benchmark" style={{ stroke: "#F7931A" }} /> : null}
+        {visibleBenchmarks.solana && solanaPath ? <path d={solanaPath} className="chart-line is-benchmark" style={{ stroke: "#9945FF" }} /> : null}
+        <path d={linePath} className={`chart-line ${coords[coords.length - 1].indexValue >= coords[0].indexValue ? "is-up" : "is-down"}`} />
         {interactiveCoords.map((point) => (
           <rect
             key={`${point.localDate}-zone`}
@@ -960,17 +1397,121 @@ function Chart({ points }: { points: ChartPoint[] }) {
         <div
           className="chart-tooltip"
           style={{
-            left: `${Math.max(Math.min(hoveredPoint.x + 18, hoveredPoint.width - 196), 12)}px`,
+            left: hoveredPoint.x > hoveredPoint.width * 0.58
+              ? `${Math.max(hoveredPoint.x - 208, 12)}px`
+              : `${Math.min(hoveredPoint.x + 18, hoveredPoint.width - 208)}px`,
             top: `${Math.max(Math.min(hoveredPoint.y - 78, hoveredPoint.height - 96), 12)}px`,
           }}
         >
           <span>{hoveredPoint.point.tooltipContext}</span>
           <strong>{formatCurrency(hoveredPoint.point.value)}</strong>
           <p>{hoveredPoint.point.timestampLabel}</p>
+          <p className="chart-tooltip-idx">IDX {hoveredPoint.indexValue.toFixed(1)}</p>
         </div>
       ) : null}
+      <div className="chart-idx-explainer" aria-label="Performance index info">
+        <span>IDX</span>
+        <div className="chart-idx-popover" role="tooltip">
+          <strong>Performance Index</strong>
+          <p>Rebased to 100 at the start of the period. IDX 115 = portfolio up 15% since start. Allows you to compare your portfolio against BTC and SOL on the same scale.</p>
+        </div>
+      </div>
     </div>
   );
+}
+
+function ChartLegendButton({
+  label,
+  color,
+  active,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  color: string;
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`chart-legend-btn ${active ? "is-active" : ""}`}
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={active}
+    >
+      <span className="chart-legend-dot" style={{ backgroundColor: color }} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function buildPortfolioIndexSeries(points: ChartPoint[]) {
+  const firstValue = points[0]?.value;
+  const base = firstValue && firstValue > 0 ? firstValue : 1;
+  return points.map((point) => ({
+    ...point,
+    indexValue: point.value > 0 ? (point.value / base) * 100 : 100,
+  }));
+}
+
+function buildBenchmarkSeries(points: BenchmarkData["bitcoin"], chartPoints: ChartPoint[]) {
+  if (points.length === 0 || chartPoints.length === 0) {
+    return [];
+  }
+
+  const benchmarks = points
+    .map((point) => ({
+      localDate: new Date(point.timestamp * 1000).toISOString().slice(0, 10),
+      rawIndex: point.index,
+    }))
+    .sort((left, right) => left.localDate.localeCompare(right.localDate));
+
+  if (benchmarks.length === 0) return [];
+
+  const valueAtOrBefore = (date: string): number | null => {
+    let result: number | null = null;
+    for (const b of benchmarks) {
+      if (b.localDate <= date) result = b.rawIndex;
+      else break;
+    }
+    return result;
+  };
+
+  const baseValue = valueAtOrBefore(chartPoints[0].localDate) ?? benchmarks[0].rawIndex;
+  if (baseValue <= 0) return [];
+
+  return chartPoints.map((cp) => {
+    const value = valueAtOrBefore(cp.localDate) ?? baseValue;
+    return {
+      localDate: cp.localDate,
+      label: cp.label,
+      indexValue: (value / baseValue) * 100,
+    };
+  });
+}
+
+function toChartCoord<T extends { indexValue: number }>(
+  point: T,
+  index: number,
+  count: number,
+  padLeft: number,
+  padRight: number,
+  padTop: number,
+  padBottom: number,
+  width: number,
+  height: number,
+  floor: number,
+  range: number,
+) {
+  const x = count === 1 ? (padLeft + width - padRight) / 2 : padLeft + (index * (width - padLeft - padRight)) / Math.max(1, count - 1);
+  const y = height - padBottom - ((point.indexValue - floor) / range) * (height - padTop - padBottom);
+  return { ...point, x, y };
+}
+
+function buildSvgPath(points: Array<{ x: number; y: number }>): string {
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
 }
 
 function AllocationDonutChart({
@@ -1047,6 +1588,15 @@ function AllocationDonutChart({
           <strong>{activeRow?.displayName ?? "Waiting"}</strong>
           <div className="allocation-center-value">{activeRow ? formatCurrency(activeRow.valueUsd) : "No data"}</div>
           <span className="allocation-center-share">{activeRow ? formatShare(activeRow.share) : "0.00%"}</span>
+          {activeRow?.sourceBreakdown && activeRow.sourceBreakdown.length > 1 ? (
+            <div className="allocation-center-sources">
+              {activeRow.sourceBreakdown.map((source) => (
+                <span key={source.label}>
+                  {source.label.replace(" balance", "")} {formatCurrency(source.valueUsd)}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1056,13 +1606,11 @@ function AllocationDonutChart({
 function AllocationDetailList({
   rows,
   mode,
-  totalRows,
   activeKey,
   onActiveKeyChange,
 }: {
   rows: AllocationChartRow[];
   mode: AllocationMode;
-  totalRows: number;
   activeKey: string | null;
   onActiveKeyChange: (key: string | null) => void;
 }) {
@@ -1096,21 +1644,57 @@ function AllocationDetailList({
                 <span className="legend-swatch" style={{ backgroundColor: row.color }} />
                 <strong>{row.displayName}</strong>
               </div>
-              <p className="allocation-legend-copy">
-                {row.grouped
-                  ? `${row.groupedCount} smaller ${modeMeta.plural} combined into a single terminal bucket.`
-                  : `${modeMeta.label} concentration tracked inside the current ranked breakdown.`}
-              </p>
+              {row.grouped ? (
+                <p className="allocation-legend-copy">
+                  {`${row.groupedCount} smaller ${modeMeta.plural} combined into a single bucket.`}
+                </p>
+              ) : null}
             </div>
             <div className="allocation-legend-values">
               <strong>{formatShare(row.share)}</strong>
               <span className="mono">{formatCurrency(row.valueUsd)}</span>
-              {index === 0 ? <span className="allocation-legend-note">Lead slice / {totalRows} total</span> : null}
             </div>
           </article>
         );
       })}
     </div>
+  );
+}
+
+function SyncValueLoader({ label, compact = false }: { label: string; compact?: boolean }) {
+  return (
+    <span className={`s-sync-value ${compact ? "is-compact" : ""}`} role="status" aria-live="polite">
+      <span className="s-sync-value-track">
+        <span className="s-sync-value-fill" />
+      </span>
+      <span className="s-sync-value-label mono">{label}</span>
+    </span>
+  );
+}
+
+function NetWorthValue({
+  value,
+  loading,
+  compact = false,
+}: {
+  value: number;
+  loading: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <span className={`s-net-worth-value ${compact ? "is-compact" : ""}`}>
+      <span className="s-net-worth-amount">{formatCurrency(value)}</span>
+      {loading ? <NetWorthProgressPill label="CALCULATING" /> : null}
+    </span>
+  );
+}
+
+function NetWorthProgressPill({ label }: { label: string }) {
+  return (
+    <span className="s-net-worth-pending" role="status" aria-live="polite">
+      <span className="s-net-worth-pulse" aria-hidden="true" />
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -1135,7 +1719,7 @@ function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUs
       value: currentTotalUsd,
       current: true,
       timestampLabel: formatHistoryPointTimestamp(currentDate, true),
-      tooltipContext: "Live overview",
+      tooltipContext: "Current wallet/network scope",
     };
     const existingIndex = points.findIndex((point) => point.localDate === currentDate);
     if (existingIndex >= 0) {
@@ -1153,7 +1737,7 @@ function buildChartPoints(historyPoints: PortfolioHistoryPoint[], currentTotalUs
   return points;
 }
 
-function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): AllocationChartRow[] {
+function buildAllocationChartRows(rows: AllocationInputRow[], totalUsd: number): AllocationChartRow[] {
   if (totalUsd <= 0) {
     return [];
   }
@@ -1195,24 +1779,328 @@ function buildAllocationChartRows(rows: ChainAllocation[], totalUsd: number): Al
   ];
 }
 
+function buildTokenAllocationRows(
+  assets: AssetRow[],
+  defiTokenValues: Record<string, number>,
+): AllocationInputRow[] {
+  const rows = new Map<string, AllocationInputRow>();
+
+  for (const row of groupAllocationsByToken(assets)) {
+    const key = canonicalTokenAllocationKey(row.displayName || row.network);
+    rows.set(key, {
+      network: key,
+      displayName: row.displayName,
+      valueUsd: row.valueUsd,
+      sourceBreakdown: row.valueUsd > 0 ? [{ label: "Spot balance", valueUsd: row.valueUsd }] : [],
+    });
+  }
+
+  for (const [symbol, valueUsd] of Object.entries(defiTokenValues)) {
+    if (valueUsd <= 0) {
+      continue;
+    }
+
+    const key = canonicalTokenAllocationKey(symbol);
+    const existing = rows.get(key);
+    if (existing) {
+      rows.set(key, {
+        ...existing,
+        valueUsd: existing.valueUsd + valueUsd,
+        sourceBreakdown: mergeAllocationSources(existing.sourceBreakdown, "DeFi positions", valueUsd),
+      });
+      continue;
+    }
+
+    rows.set(key, {
+      network: key,
+      displayName: key,
+      valueUsd,
+      sourceBreakdown: [{ label: "DeFi positions", valueUsd }],
+    });
+  }
+
+  return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function buildBackendDefiTokenValues(
+  positions: Array<Pick<LendingPositionResponse, "underlyingSymbol" | "netUsd" | "alreadyCountedInPortfolio">>,
+): Record<string, number> {
+  return positions.reduce<Record<string, number>>((values, position) => {
+    if (position.alreadyCountedInPortfolio) {
+      return values;
+    }
+
+    const valueUsd = position.netUsd ?? 0;
+    if (valueUsd <= 0) {
+      return values;
+    }
+
+    const symbol = canonicalTokenAllocationKey(position.underlyingSymbol);
+    values[symbol] = (values[symbol] ?? 0) + valueUsd;
+    return values;
+  }, {});
+}
+
+function mergeValueMaps(...maps: Array<Record<string, number>>): Record<string, number> {
+  return maps.reduce<Record<string, number>>((merged, map) => {
+    for (const [rawKey, valueUsd] of Object.entries(map)) {
+      const key = canonicalTokenAllocationKey(rawKey);
+      merged[key] = (merged[key] ?? 0) + valueUsd;
+    }
+    return merged;
+  }, {});
+}
+
+function mergeAllocationSources(
+  sources: AllocationSourceBreakdown[] | undefined,
+  label: string,
+  valueUsd: number,
+): AllocationSourceBreakdown[] {
+  const next = [...(sources ?? [])];
+  const existing = next.find((source) => source.label === label);
+  if (existing) {
+    existing.valueUsd += valueUsd;
+  } else {
+    next.push({ label, valueUsd });
+  }
+  return next.filter((source) => source.valueUsd > 0);
+}
+
+function canonicalTokenAllocationKey(value: string): string {
+  const symbol = value.trim().toUpperCase();
+  if (symbol === "USDC.E") return "USDC";
+  if (symbol === "WETH") return "ETH";
+  return symbol || "UNKNOWN";
+}
+
+function buildAssetInventoryRows(assets: AssetRow[]): AssetInventoryRow[] {
+  type MutableInventoryRow = Omit<AssetInventoryRow, "priceUsd" | "networkLabel" | "typeLabel"> & {
+    networkSet: Set<string>;
+    valueByNetwork: Map<string, number>;
+    hasNative: boolean;
+    hasWrapped: boolean;
+    hasPlatform: boolean;
+    hasToken: boolean;
+  };
+
+  const rows = new Map<string, MutableInventoryRow>();
+
+  for (const asset of assets) {
+    const canonical = canonicalAsset(asset);
+    const existing = rows.get(canonical.key);
+    if (existing) {
+      existing.quantity += asset.quantity;
+      existing.valueUsd += asset.valueUsd;
+      existing.networkSet.add(asset.network);
+      existing.valueByNetwork.set(asset.network, (existing.valueByNetwork.get(asset.network) ?? 0) + asset.valueUsd);
+      existing.hasNative = existing.hasNative || asset.nativeToken;
+      existing.hasWrapped = existing.hasWrapped || canonical.wrapped;
+      existing.hasPlatform = existing.hasPlatform || asset.network === "hyperliquid";
+      existing.hasToken = existing.hasToken || (!asset.nativeToken && !canonical.wrapped);
+    } else {
+      rows.set(canonical.key, {
+        key: canonical.key,
+        symbol: canonical.symbol,
+        name: canonical.name,
+        quantity: asset.quantity,
+        valueUsd: asset.valueUsd,
+        networks: [],
+        networkBreakdown: [],
+        networkSet: new Set([asset.network]),
+        valueByNetwork: new Map([[asset.network, asset.valueUsd]]),
+        hasNative: asset.nativeToken,
+        hasWrapped: canonical.wrapped,
+        hasPlatform: asset.network === "hyperliquid",
+        hasToken: !asset.nativeToken && !canonical.wrapped,
+      });
+    }
+  }
+
+  return [...rows.values()]
+    .map((row) => {
+      const networks = [...row.networkSet].sort();
+      const networkBreakdown = [...row.valueByNetwork.entries()]
+        .map(([network, valueUsd]) => ({
+          network,
+          label: displayNetwork(network),
+          valueUsd,
+          share: shareOf(valueUsd, row.valueUsd),
+        }))
+        .sort((left, right) => right.valueUsd - left.valueUsd);
+      return {
+        key: row.key,
+        symbol: row.symbol,
+        name: row.name,
+        quantity: row.quantity,
+        priceUsd: row.quantity > 0 ? row.valueUsd / row.quantity : 0,
+        valueUsd: row.valueUsd,
+        networks,
+        networkBreakdown,
+        networkLabel: networks.length === 1 ? displayNetwork(networks[0]) : `${networks.length} NETWORKS`,
+        typeLabel: inventoryTypeLabel(row),
+      };
+    })
+    .sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function inventoryTypeLabel(row: {
+  hasNative: boolean;
+  hasWrapped: boolean;
+  hasPlatform: boolean;
+  hasToken: boolean;
+}): string {
+  if (row.hasPlatform && !row.hasNative && !row.hasWrapped && !row.hasToken) return "PLATFORM";
+  if (row.hasNative && row.hasWrapped) return "NATIVE + WRAPPED";
+  if (row.hasNative) return "NATIVE";
+  if (row.hasWrapped) return "WRAPPED";
+  return "TOKEN";
+}
+
+function buildChainAllocationRows(
+  allocations: ChainAllocation[],
+  defiChainValues: Record<string, number>,
+): ChainAllocation[] {
+  const rows = new Map<string, ChainAllocation>();
+
+  for (const allocation of allocations) {
+    const key = normalizeNetworkKey(allocation.network);
+    rows.set(key, { ...allocation, network: key });
+  }
+
+  for (const [chain, valueUsd] of Object.entries(defiChainValues)) {
+    if (valueUsd <= 0) continue;
+    const key = normalizeNetworkKey(chain);
+    const existing = rows.get(key);
+    rows.set(key, {
+      network: key,
+      displayName: existing?.displayName ?? networkDisplayName(key),
+      valueUsd: (existing?.valueUsd ?? 0) + valueUsd,
+    });
+  }
+
+  return [...rows.values()].sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function sumAllocationForNetwork(allocations: ChainAllocation[], network: string): number {
+  const target = normalizeNetworkKey(network);
+  return allocations.reduce((sum, allocation) => {
+    const key = normalizeNetworkKey(allocation.network);
+    return key === target ? sum + allocation.valueUsd : sum;
+  }, 0);
+}
+
+function normalizeNetworkKey(network: string): string {
+  return network.trim().toLowerCase().replace(/-mainnet$/, "");
+}
+
+function networkDisplayName(network: string): string {
+  const names: Record<string, string> = {
+    solana: "Solana",
+    ethereum: "Ethereum",
+    arbitrum: "Arbitrum",
+    base: "Base",
+    polygon: "Polygon",
+    optimism: "Optimism",
+    "binance-smart-chain": "BNB Chain",
+    avalanche: "Avalanche",
+    fantom: "Fantom",
+  };
+  return names[network] ?? network.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function buildWalletAllocationRows(
   walletAllocations: PortfolioSummaryResponse["walletAllocations"],
   wallets: WalletRecord[],
+  solanaDefiWalletValues: Record<string, number>,
 ): ChainAllocation[] {
   const labelByAddress = new Map(
-    wallets.map((wallet) => [
-      wallet.normalizedAddress,
-      wallet.label?.trim() ? `${wallet.label.trim()} / ${shortAddress(wallet.originalInput)}` : shortAddress(wallet.originalInput),
-    ]),
+    wallets.map((wallet) => {
+      const displayAddress = wallet.originalInput || wallet.normalizedAddress;
+      return [
+        walletKey(wallet.normalizedAddress),
+        wallet.label?.trim() ? `${wallet.label.trim()} / ${shortAddress(displayAddress)}` : shortAddress(displayAddress),
+      ];
+    }),
   );
+  const valueByWallet = new Map<string, number>();
 
-  return walletAllocations
-    .map((allocation) => ({
-      network: allocation.walletAddress,
-      displayName: labelByAddress.get(allocation.walletAddress.toLowerCase()) ?? shortAddress(allocation.walletAddress),
-      valueUsd: allocation.valueUsd,
+  for (const allocation of walletAllocations) {
+    valueByWallet.set(walletKey(allocation.walletAddress), allocation.valueUsd);
+  }
+
+  for (const [walletAddress, valueUsd] of Object.entries(solanaDefiWalletValues)) {
+    const key = walletKey(walletAddress);
+    valueByWallet.set(key, (valueByWallet.get(key) ?? 0) + valueUsd);
+  }
+
+  return [...valueByWallet.entries()]
+    .map(([walletAddress, valueUsd]) => ({
+      network: walletAddress,
+      displayName: labelByAddress.get(walletAddress) ?? shortAddress(walletAddress),
+      valueUsd,
     }))
     .sort((left, right) => right.valueUsd - left.valueUsd);
+}
+
+function parseWalletInput(value: string): string[] {
+  return value
+    .split(/[\s,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function walletKey(address: string): string {
+  return isValidEvmAddress(address) ? address.toLowerCase() : address;
+}
+
+function reconcileSelectedChains(
+  supportedChains: ChainOption[],
+  savedSelectedChains: string | null,
+  savedChainCatalog: string | null,
+): string[] {
+  const supportedIds = supportedChains.map((chain) => chain.id);
+  if (!savedSelectedChains) {
+    return supportedIds;
+  }
+
+  const supportedIdSet = new Set(supportedIds);
+  const savedIds = savedSelectedChains
+    .split(",")
+    .map((chain) => chain.trim())
+    .filter((chain) => supportedIdSet.has(chain));
+
+  if (savedIds.length === 0) {
+    return supportedIds;
+  }
+
+  const selected = new Set(savedIds);
+  const previousCatalogIds = savedChainCatalog
+    ?.split("|")
+    .map((chain) => chain.trim())
+    .filter(Boolean);
+
+  if (previousCatalogIds && previousCatalogIds.length > 0) {
+    const selectedPreviousCatalog = previousCatalogIds.every((chain) => selected.has(chain));
+    if (selectedPreviousCatalog) {
+      for (const chainId of supportedIds) {
+        if (!previousCatalogIds.includes(chainId)) {
+          selected.add(chainId);
+        }
+      }
+    }
+  } else if (supportedIdSet.has("solana")) {
+    const nonSolanaIds = supportedIds.filter((chain) => chain !== "solana");
+    const selectedAllPreviousEvmChains = nonSolanaIds.length > 0 && nonSolanaIds.every((chain) => selected.has(chain));
+    if (selectedAllPreviousEvmChains) {
+      selected.add("solana");
+    }
+  }
+
+  return supportedIds.filter((chain) => selected.has(chain));
+}
+
+function catalogSignature(chains: ChainOption[]): string {
+  return chains.map((chain) => chain.id).sort().join("|");
 }
 
 function allocationModeMeta(mode: AllocationMode): {
@@ -1249,50 +2137,6 @@ function allocationRowKey(row: Pick<AllocationChartRow, "network" | "displayName
   }
 
   return `${row.network}::${row.displayName}`;
-}
-
-function buildActivity(
-  wallets: WalletRecord[],
-  historyPoints: PortfolioHistoryPoint[],
-  lastRefresh: string | null,
-  totalUsd: number | null,
-): ActivityItem[] {
-  const items: ActivityItem[] = [];
-
-  if (lastRefresh) {
-    items.push({
-      id: `refresh-${lastRefresh}`,
-      kind: "SYNC",
-      title: "Live portfolio refresh completed",
-      detail: "Composite portfolio overview fetched from providers",
-      timestamp: lastRefresh,
-      valueUsd: totalUsd,
-    });
-  }
-
-  for (const wallet of wallets) {
-    items.push({
-      id: `wallet-${wallet.normalizedAddress}`,
-      kind: "WALLET",
-      title: "Wallet registered into local watch set",
-      detail: wallet.label || shortAddress(wallet.originalInput),
-      timestamp: wallet.createdAt,
-      valueUsd: null,
-    });
-  }
-
-  for (const point of historyPoints.slice(-8)) {
-    items.push({
-      id: `snapshot-${point.localDate}`,
-      kind: "HISTORY",
-      title: "Server checkpoint available",
-      detail: `${point.localDate} / ${point.source}`,
-      timestamp: point.localDate,
-      valueUsd: point.totalUsd,
-    });
-  }
-
-  return items.sort((left, right) => right.timestamp.localeCompare(left.timestamp)).slice(0, 10);
 }
 
 type ProtocolGroup = {
@@ -1387,7 +2231,10 @@ function displayNetwork(network: string): string {
   return network.replace("-mainnet", "").replace(/-/g, " ").toUpperCase();
 }
 
-function shortAddress(value: string): string {
+function shortAddress(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
   return value.length <= 14 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 
@@ -1434,6 +2281,21 @@ function formatHistoryPointTimestamp(localDate: string, isCurrent: boolean): str
   return isCurrent
     ? `${date.toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })} live`
     : `${date.toLocaleString("en-US", { month: "short", day: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
+}
+
+function historyStartTimestamp(points: PortfolioHistoryPoint[]): number | null {
+  const firstPoint = points
+    .slice()
+    .sort((left, right) => left.localDate.localeCompare(right.localDate))[0];
+  if (!firstPoint) {
+    return null;
+  }
+  const timestamp = new Date(`${firstPoint.localDate}T00:00:00Z`).getTime();
+  return Number.isNaN(timestamp) ? null : Math.floor(timestamp / 1000);
+}
+
+function formatIndexAxis(value: number): string {
+  return `${value.toFixed(0)}`;
 }
 
 function formatAxisCurrency(value: number): string {

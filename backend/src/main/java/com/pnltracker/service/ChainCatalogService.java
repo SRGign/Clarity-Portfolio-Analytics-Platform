@@ -39,11 +39,16 @@ public class ChainCatalogService {
         register(chains, "apechain", "apechain-mainnet", "ApeChain");
         register(chains, "abstract", "abstract-mainnet", "Abstract");
         register(chains, "moonbeam", "moonbeam-mainnet", "Moonbeam");
+        register(chains, "solana", "solana-mainnet", "Solana", "SOLANA");
         this.chainsById = Map.copyOf(chains);
     }
 
     private void register(Map<String, ChainDefinition> chains, String id, String providerNetwork, String displayName) {
-        chains.put(id, new ChainDefinition(id, providerNetwork, displayName, "EVM", true));
+        register(chains, id, providerNetwork, displayName, "EVM");
+    }
+
+    private void register(Map<String, ChainDefinition> chains, String id, String providerNetwork, String displayName, String family) {
+        chains.put(id, new ChainDefinition(id, providerNetwork, displayName, family, true));
     }
 
     public List<ChainDefinition> all() {

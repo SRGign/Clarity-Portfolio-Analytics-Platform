@@ -26,6 +26,7 @@ Thumbs.db
 .vscode/
 
 # Frontend
+node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/.turbo/
@@ -54,9 +55,11 @@ backend/bin/
 backend/*.log
 backend/*.db
 backend/*.db-*
+backend/*.db.*
 backend/*.sqlite
 backend/*.sqlite-*
 backend/*.mv.db
 backend/*.trace.db
 backend/gradle-*/
 backend/*.zip
+.gradle-run/

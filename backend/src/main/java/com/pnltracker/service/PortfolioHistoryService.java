@@ -15,9 +15,11 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -27,44 +29,62 @@ import com.pnltracker.domain.ChainDefinition;
 @Service
 public class PortfolioHistoryService {
 
-    private static final String HYPERLIQUID_SCOPE = "hyperliquid";
+    private static final String GOLDRUSH_SOURCE = "goldrush";
+    private static final Pattern EVM_ADDRESS = Pattern.compile("^0x[0-9a-f]{40}$");
 
     private final ChainCatalogService chainCatalogService;
     private final PortfolioHistoryRepository historyRepository;
-    private final List<PortfolioHistoryProvider> historyProviders;
+    private final PortfolioHistoryProvider historyProvider;
     private final Clock clock;
 
     @Autowired
     public PortfolioHistoryService(
             ChainCatalogService chainCatalogService,
             PortfolioHistoryRepository historyRepository,
-            List<PortfolioHistoryProvider> historyProviders) {
-        this(chainCatalogService, historyRepository, historyProviders, Clock.systemUTC());
+            GoldRushPortfolioHistoryProvider goldRushPortfolioHistoryProvider) {
+        this(chainCatalogService, historyRepository, goldRushPortfolioHistoryProvider, Clock.systemUTC());
     }
 
     PortfolioHistoryService(
             ChainCatalogService chainCatalogService,
             PortfolioHistoryRepository historyRepository,
-            List<PortfolioHistoryProvider> historyProviders,
+            PortfolioHistoryProvider historyProvider,
             Clock clock) {
         this.chainCatalogService = chainCatalogService;
         this.historyRepository = historyRepository;
-        this.historyProviders = List.copyOf(historyProviders);
+        this.historyProvider = historyProvider;
         this.clock = clock;
     }
 
     public PortfolioHistoryResult getHistory(List<String> addresses, List<String> chains, PortfolioHistoryPeriod period) {
         Scope scope = normalizeScope(addresses, chains);
+        if (scope.addresses().isEmpty() || scope.resolvedChains().isEmpty()) {
+            return new PortfolioHistoryResult(
+                    period,
+                    scope.scopeHash(),
+                    List.of(),
+                    false,
+                    List.of(),
+                    Instant.now(clock));
+        }
+
         LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
         LocalDate fromDate = today.minusDays(period.lookbackDays());
         Set<LocalDate> requiredDates = requiredDates(fromDate, today);
 
-        List<PortfolioHistorySnapshot> storedSnapshots = historyRepository.findSnapshots(scope.scopeHash(), fromDate, today);
+        List<PortfolioHistorySnapshot> storedSnapshots = historyRepository.findSnapshots(scope.scopeHash(), fromDate, today).stream()
+                .filter(snapshot -> GOLDRUSH_SOURCE.equals(snapshot.source()))
+                .toList();
         Map<LocalDate, PortfolioHistorySnapshot> storedByDate = new LinkedHashMap<>();
         storedSnapshots.forEach(snapshot -> storedByDate.put(snapshot.localDate(), snapshot));
 
+        Set<LocalDate> storedProviderDates = new TreeSet<>();
+        storedSnapshots.stream()
+                .map(PortfolioHistorySnapshot::localDate)
+                .forEach(storedProviderDates::add);
+
         Set<LocalDate> missingDates = new TreeSet<>(requiredDates);
-        missingDates.removeAll(storedByDate.keySet());
+        missingDates.removeAll(storedProviderDates);
 
         Map<LocalDate, BigDecimal> fetchedTotals = new LinkedHashMap<>();
         Map<LocalDate, LinkedHashSet<String>> fetchedSources = new LinkedHashMap<>();
@@ -76,17 +96,15 @@ public class PortfolioHistoryService {
                     missingDates,
                     period);
 
-            for (PortfolioHistoryProvider provider : historyProviders) {
-                PortfolioHistoryFetchResult fetchResult = provider.fetchHistory(fetchRequest);
-                missingChains.addAll(fetchResult.missingChains());
-                fetchResult.totalsByDate().forEach((localDate, totalUsd) -> {
-                    if (!missingDates.contains(localDate)) {
-                        return;
-                    }
-                    fetchedTotals.merge(localDate, totalUsd, BigDecimal::add);
-                    fetchedSources.computeIfAbsent(localDate, ignored -> new LinkedHashSet<>()).add(fetchResult.source());
-                });
-            }
+            PortfolioHistoryFetchResult fetchResult = historyProvider.fetchHistory(fetchRequest);
+            missingChains.addAll(fetchResult.missingChains());
+            fetchResult.totalsByDate().forEach((localDate, totalUsd) -> {
+                if (!missingDates.contains(localDate)) {
+                    return;
+                }
+                fetchedTotals.put(localDate, totalUsd);
+                fetchedSources.computeIfAbsent(localDate, ignored -> new LinkedHashSet<>()).add(fetchResult.source());
+            });
 
             Instant now = Instant.now(clock);
             List<PortfolioHistorySnapshot> newSnapshots = fetchedTotals.entrySet().stream()
@@ -145,27 +163,11 @@ public class PortfolioHistoryService {
                 Instant.now(clock));
     }
 
-    public void recordLiveSnapshot(List<String> addresses, List<String> chains, BigDecimal totalUsd) {
-        Scope scope = normalizeScope(addresses, chains);
-        Instant now = Instant.now(clock);
-        PortfolioHistorySnapshot snapshot = new PortfolioHistorySnapshot(
-                scope.scopeHash(),
-                scope.addresses(),
-                scope.effectiveChains(),
-                LocalDate.now(clock.withZone(ZoneOffset.UTC)),
-                scaleUsd(totalUsd),
-                "live-overview",
-                false,
-                List.of(),
-                now);
-        historyRepository.upsertSnapshots(List.of(snapshot));
-    }
-
     private Scope normalizeScope(List<String> addresses, List<String> chains) {
         List<String> normalizedAddresses = addresses.stream()
                 .map(String::trim)
                 .filter(value -> !value.isEmpty())
-                .map(String::toLowerCase)
+                .map(this::normalizeWalletKey)
                 .distinct()
                 .sorted()
                 .toList();
@@ -173,16 +175,34 @@ public class PortfolioHistoryService {
             throw new IllegalArgumentException("At least one address is required");
         }
 
-        List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains);
+        List<String> historyAddresses = normalizedAddresses.stream()
+                .filter(this::isEvmAddress)
+                .toList();
+
+        List<ChainDefinition> resolvedChains = chainCatalogService.resolve(chains).stream()
+                .filter(this::isGoldRushHistoryChain)
+                .toList();
         List<String> effectiveChains = new ArrayList<>(resolvedChains.stream().map(ChainDefinition::id).sorted().toList());
-        effectiveChains.add(HYPERLIQUID_SCOPE);
         effectiveChains = effectiveChains.stream().distinct().sorted().toList();
 
         return new Scope(
-                normalizedAddresses,
+                historyAddresses,
                 resolvedChains,
                 effectiveChains,
-                scopeHash(normalizedAddresses, effectiveChains));
+                scopeHash(historyAddresses, effectiveChains));
+    }
+
+    private String normalizeWalletKey(String address) {
+        String trimmed = address == null ? "" : address.trim();
+        return trimmed.matches("(?i)^0x[0-9a-f]{40}$") ? trimmed.toLowerCase(Locale.ROOT) : trimmed;
+    }
+
+    private boolean isEvmAddress(String address) {
+        return EVM_ADDRESS.matcher(address).matches();
+    }
+
+    private boolean isGoldRushHistoryChain(ChainDefinition chain) {
+        return "EVM".equalsIgnoreCase(chain.family());
     }
 
     private String scopeHash(List<String> addresses, List<String> chains) {

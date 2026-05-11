@@ -12,7 +12,14 @@ final class AssetIds {
     static String fromProviderAsset(ProviderAsset providerAsset) {
         String tokenAddress = providerAsset.tokenAddress() == null
                 ? "native"
-                : providerAsset.tokenAddress().toLowerCase(Locale.ROOT);
+                : normalizeTokenAddress(providerAsset.network(), providerAsset.tokenAddress());
         return providerAsset.network() + ":" + tokenAddress;
+    }
+
+    private static String normalizeTokenAddress(String network, String tokenAddress) {
+        if ("solana-mainnet".equalsIgnoreCase(network)) {
+            return tokenAddress;
+        }
+        return tokenAddress.toLowerCase(Locale.ROOT);
     }
 }
