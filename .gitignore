@@ -55,6 +55,7 @@ backend/bin/
 backend/*.log
 backend/*.db
 backend/*.db-*
+backend/*.db.*
 backend/*.sqlite
 backend/*.sqlite-*
 backend/*.mv.db
