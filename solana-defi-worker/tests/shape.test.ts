@@ -5,9 +5,12 @@ import { isValidPosition, makePosition, pricedToken } from "../src/adapters/util
 describe("worker shape contracts", () => {
   it("registers all requested protocol adapters", () => {
     expect(listProtocols()).toEqual([
+      { protocolId: "jupiter-lend", protocolName: "Jupiter Lend", category: "lending" },
       { protocolId: "kamino-lend", protocolName: "Kamino Lend", category: "lending" },
       { protocolId: "kamino-vault", protocolName: "Kamino Vault", category: "yield" },
       { protocolId: "kamino-liquidity", protocolName: "Kamino Liquidity", category: "yield" },
+      { protocolId: "loopscale", protocolName: "Loopscale", category: "lending" },
+      { protocolId: "lulo", protocolName: "Lulo", category: "yield" },
       { protocolId: "marinade-native", protocolName: "Marinade Native", category: "staking" },
       { protocolId: "raydium-clmm", protocolName: "Raydium CLMM", category: "clmm" },
       { protocolId: "raydium-amm", protocolName: "Raydium AMM", category: "amm" },
