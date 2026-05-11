@@ -156,21 +156,23 @@ export function AiAdvisorBlock({ wallets, chains }: Props) {
 
           <div className="s-ai-columns">
             <AdvisorColumn title="RISKS">
-              {summary.risks.slice(0, 3).map((risk) => (
+              {summary.risks.slice(0, 2).map((risk) => (
                 <RiskItem key={`${risk.severity}-${risk.title}`} risk={risk} />
               ))}
             </AdvisorColumn>
             <AdvisorColumn title="OPPORTUNITIES">
-              {summary.opportunities.slice(0, 3).map((opportunity) => (
+              {summary.opportunities.slice(0, 2).map((opportunity) => (
                 <OpportunityItem key={`${opportunity.effort}-${opportunity.title}`} opportunity={opportunity} />
               ))}
             </AdvisorColumn>
             <AdvisorColumn title="ACTIONS">
-              {summary.actions.slice(0, 4).map((action) => (
+              {summary.actions.slice(0, 2).map((action) => (
                 <ActionItem key={`${action.priority}-${action.action}`} action={action} />
               ))}
             </AdvisorColumn>
           </div>
+
+          <p className="s-ai-caveat">{summary.caveat}</p>
 
           <div className="s-ai-chat">
             <div className="s-ai-chat-log" ref={chatLogRef}>

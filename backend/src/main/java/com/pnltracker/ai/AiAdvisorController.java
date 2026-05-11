@@ -295,14 +295,27 @@ public class AiAdvisorController {
     }
 
     private boolean isFallbackEligible(AiAdvisorException exception) {
-        return "AI_RATE_LIMITED".equals(exception.errorCode()) || "AI_UPSTREAM_ERROR".equals(exception.errorCode());
+        return "AI_RATE_LIMITED".equals(exception.errorCode())
+                || "AI_UPSTREAM_ERROR".equals(exception.errorCode())
+                || "AI_RESPONSE_TRUNCATED".equals(exception.errorCode());
     }
 
     private String normalizeChatReply(String reply) {
         String text = reply == null ? "" : reply.trim();
         text = text.replaceAll("\\s+(?=\\d+\\.\\s)", "\n");
         text = text.replaceAll("\\s+(?=(Please remember|This is not financial advice|Not financial advice))", "\n\n");
-        return text.replaceAll("\\n{3,}", "\n\n");
+        return ensureSafeCaveat(text.replaceAll("\\n{3,}", "\n\n"));
+    }
+
+    private String ensureSafeCaveat(String reply) {
+        String text = reply == null ? "" : reply.trim();
+        if (text.isEmpty()) {
+            return SAFE_CAVEAT;
+        }
+        if (text.toLowerCase(Locale.ROOT).contains("not financial advice")) {
+            return text;
+        }
+        return text + "\n\n" + SAFE_CAVEAT;
     }
 
     private Map<String, Object> parseSummaryResponse(String response, PortfolioContext context) {
@@ -316,9 +329,7 @@ public class AiAdvisorController {
             summary.put("caveat", SAFE_CAVEAT);
             return summary;
         } catch (Exception exception) {
-            return portfolioAdvisorFallback.summarize(
-                    context,
-                    "Gemini returned malformed JSON, so this readout used deterministic portfolio rules.");
+            return portfolioAdvisorFallback.summarize(context);
         }
     }
 

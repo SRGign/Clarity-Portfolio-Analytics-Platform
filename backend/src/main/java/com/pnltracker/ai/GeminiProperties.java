@@ -10,7 +10,7 @@ public class GeminiProperties {
     private String baseUrl = "https://generativelanguage.googleapis.com";
     private String apiKey = "";
     private String model = "gemini-2.5-flash";
-    private int maxTokens = 2000;
+    private Integer maxTokens;
 
     public String getBaseUrl() {
         return baseUrl;
@@ -36,11 +36,11 @@ public class GeminiProperties {
         this.model = model;
     }
 
-    public int getMaxTokens() {
+    public Integer getMaxTokens() {
         return maxTokens;
     }
 
-    public void setMaxTokens(int maxTokens) {
+    public void setMaxTokens(Integer maxTokens) {
         this.maxTokens = maxTokens;
     }
 }

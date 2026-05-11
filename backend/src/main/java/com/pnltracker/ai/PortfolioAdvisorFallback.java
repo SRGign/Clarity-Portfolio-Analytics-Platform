@@ -11,16 +11,37 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 @Component
 public class PortfolioAdvisorFallback {
 
+    private static final String SAFE_CAVEAT = "Not financial advice. Market rates and portfolio values can change.";
     private static final NumberFormat USD = NumberFormat.getCurrencyInstance(Locale.US);
+    private static final Set<String> CORE_MAJOR_SYMBOLS = Set.of(
+            "BTC",
+            "WBTC",
+            "CBBTC",
+            "TBTC",
+            "RENBTC",
+            "XBT",
+            "ETH",
+            "WETH",
+            "WETHE",
+            "STETH",
+            "WSTETH",
+            "RETH",
+            "CBETH",
+            "FRXETH",
+            "SFRXETH",
+            "METH",
+            "WEETH",
+            "EZETH",
+            "OSETH",
+            "SWETH");
 
     public Map<String, Object> summarize(PortfolioContext context) {
-        return summarize(
-                context,
-                "Gemini quota was unavailable, so this readout used deterministic portfolio rules.");
+        return summarize(context, "");
     }
 
     public Map<String, Object> summarize(PortfolioContext context, String fallbackReason) {
@@ -31,30 +52,31 @@ public class PortfolioAdvisorFallback {
         double largestChainPct = largestChainPct(context);
         double idleStableUsd = Math.max(context.idleStableUsd(), 0.0d);
         double benchmarkApy = yieldBenchmarkApy(context.stableYieldMarket());
+        boolean coreMajorAsset = isCoreMajorAsset(context.largestPositionSymbol());
 
-        int concentrationPenalty = largestPct >= 50.0d ? 32 : largestPct >= 30.0d ? 22 : largestPct >= 20.0d ? 10 : 0;
+        int concentrationPenalty = concentrationPenalty(largestPct, coreMajorAsset);
         int chainPenalty = largestChainPct >= 75.0d ? 18 : largestChainPct >= 60.0d ? 12 : 0;
-        int stablePenalty = stablePct < 10.0d ? 12 : stablePct > 55.0d ? 8 : 0;
+        int stablePenalty = stablePct < 10.0d ? 12 : 0;
         int defiPenalty = defiPct > 55.0d ? 16 : defiPct > 40.0d ? 10 : 0;
         int idlePenalty = idleStableUsd > Math.max(total * 0.1d, 1_000.0d) ? 8 : 0;
 
         int healthScore = clampToInt(88 - concentrationPenalty - chainPenalty - stablePenalty - defiPenalty - idlePenalty, 0, 100);
-        String concentrationRisk = concentrationRisk(largestPct, largestChainPct);
+        String concentrationRisk = concentrationRisk(largestPct, largestChainPct, coreMajorAsset);
 
         return Map.of(
                 "healthScore", healthScore,
                 "healthLabel", healthLabel(healthScore),
-                "oneLiner", oneLiner(concentrationRisk, context.largestPositionSymbol(), largestPct, largestChainPct),
+                "oneLiner", oneLiner(concentrationRisk, context.largestPositionSymbol(), largestPct, largestChainPct, coreMajorAsset),
                 "metrics", Map.of(
                         "concentrationRisk", concentrationRisk,
                         "liquidityScore", liquidityScore(stablePct, defiPct),
                         "yieldEfficiency", yieldEfficiency(total, idleStableUsd),
-                        "diversificationScore", diversificationScore(largestPct, largestChainPct),
+                        "diversificationScore", diversificationScore(largestPct, largestChainPct, coreMajorAsset),
                         "idleStableUsd", roundMoney(idleStableUsd)),
-                "risks", risks(context, total, largestPct, largestChainPct, stablePct, defiPct, idleStableUsd, benchmarkApy),
+                "risks", risks(context, total, largestPct, largestChainPct, stablePct, defiPct, idleStableUsd, benchmarkApy, coreMajorAsset),
                 "opportunities", opportunities(total, idleStableUsd, stablePct, defiPct, benchmarkApy),
-                "actions", actions(context, total, largestPct, stablePct, defiPct, idleStableUsd, benchmarkApy),
-                "caveat", "Not financial advice. Market rates and portfolio values can change. " + fallbackReason);
+                "actions", actions(context, total, largestPct, stablePct, defiPct, idleStableUsd, benchmarkApy, coreMajorAsset),
+                "caveat", SAFE_CAVEAT);
     }
 
     private List<Map<String, Object>> risks(
@@ -65,16 +87,17 @@ public class PortfolioAdvisorFallback {
             double stablePct,
             double defiPct,
             double idleStableUsd,
-            double benchmarkApy) {
+            double benchmarkApy,
+            boolean coreMajorAsset) {
         List<Map<String, Object>> risks = new ArrayList<>();
         double largestUsd = total * largestPct / 100.0d;
-        if (largestPct >= 30.0d) {
+        if (hasActionableAssetConcentration(largestPct, coreMajorAsset)) {
             risks.add(risk(
-                    "HIGH",
-                    "Asset concentration",
-                    context.largestPositionSymbol() + " is " + pct(largestPct) + " of the portfolio, about "
-                            + money(largestUsd) + ". A 20% drawdown there would hit net value by roughly "
-                            + money(largestUsd * 0.2d) + ".",
+                    coreMajorAsset ? "MEDIUM" : "HIGH",
+                    coreMajorAsset ? "Core asset size" : "Asset concentration",
+                    assetLabel(context.largestPositionSymbol()) + " is " + pct(largestPct) + " of the portfolio, about "
+                            + money(largestUsd) + ". "
+                            + assetConcentrationDetail(largestUsd, coreMajorAsset),
                     largestUsd));
         }
         if (largestChainPct >= 60.0d) {
@@ -119,7 +142,7 @@ public class PortfolioAdvisorFallback {
                             + ", both inside normal portfolio risk bands.",
                     null));
         }
-        return risks.stream().limit(3).toList();
+        return risks.stream().limit(2).toList();
     }
 
     private List<Map<String, Object>> opportunities(double total, double idleStableUsd, double stablePct, double defiPct, double benchmarkApy) {
@@ -166,7 +189,7 @@ public class PortfolioAdvisorFallback {
                     null,
                     "LOW"));
         }
-        return opportunities.stream().limit(3).toList();
+        return opportunities.stream().limit(2).toList();
     }
 
     private List<Map<String, Object>> actions(
@@ -176,14 +199,18 @@ public class PortfolioAdvisorFallback {
             double stablePct,
             double defiPct,
             double idleStableUsd,
-            double benchmarkApy) {
+            double benchmarkApy,
+            boolean coreMajorAsset) {
         List<Map<String, Object>> actions = new ArrayList<>();
-        if (largestPct >= 30.0d) {
-            double trimUsd = total * (largestPct - 25.0d) / 100.0d;
+        if (hasActionableAssetConcentration(largestPct, coreMajorAsset)) {
+            double targetPct = coreMajorAsset ? 60.0d : 25.0d;
+            double trimUsd = total * (largestPct - targetPct) / 100.0d;
             actions.add(action(
-                    "URGENT",
-                    "Trim " + money(trimUsd) + " of " + context.largestPositionSymbol(),
-                    "This brings the largest position closer to a 25% ceiling and reduces single-asset drawdown risk."));
+                    coreMajorAsset ? "CONSIDER" : "URGENT",
+                    "Trim " + money(trimUsd) + " of " + assetLabel(context.largestPositionSymbol()),
+                    coreMajorAsset
+                            ? "This keeps core BTC/ETH exposure from dominating the portfolio without treating it as a low-quality asset."
+                            : "This brings the largest position closer to a 25% ceiling and reduces single-asset drawdown risk."));
         }
         if (stablePct < 20.0d) {
             double targetUsd = Math.max(total * 0.2d - total * stablePct / 100.0d, 0.0d);
@@ -211,7 +238,7 @@ public class PortfolioAdvisorFallback {
                     "Review top 3 positions",
                     "No urgent rebalance trigger fired, so thesis quality matters more than mechanical allocation changes."));
         }
-        return actions.stream().limit(4).toList();
+        return actions.stream().limit(2).toList();
     }
 
     private Map<String, Object> risk(String severity, String title, String detail, Double impactUsd) {
@@ -239,9 +266,15 @@ public class PortfolioAdvisorFallback {
                 "rationale", rationale);
     }
 
-    private String oneLiner(String concentrationRisk, String symbol, double largestPct, double largestChainPct) {
-        if (largestPct >= 30.0d) {
-            return symbol + " concentration is the primary portfolio risk.";
+    private String oneLiner(String concentrationRisk, String symbol, double largestPct, double largestChainPct, boolean coreMajorAsset) {
+        if (coreMajorAsset && largestPct >= 30.0d && largestPct < 65.0d) {
+            return assetLabel(symbol) + " is core exposure, not the main risk.";
+        }
+        if (coreMajorAsset && largestPct >= 65.0d) {
+            return assetLabel(symbol) + " is large core exposure; size it carefully.";
+        }
+        if (!coreMajorAsset && largestPct >= 30.0d) {
+            return assetLabel(symbol) + " concentration is the primary portfolio risk.";
         }
         if (("CRITICAL".equals(concentrationRisk) || "HIGH".equals(concentrationRisk)) && largestChainPct >= 60.0d) {
             return "Chain concentration is the primary portfolio risk.";
@@ -252,17 +285,56 @@ public class PortfolioAdvisorFallback {
         return "Portfolio is workable but concentration needs monitoring.";
     }
 
-    private String concentrationRisk(double largestPct, double largestChainPct) {
-        if (largestPct >= 50.0d || largestChainPct >= 80.0d) {
+    private String concentrationRisk(double largestPct, double largestChainPct, boolean coreMajorAsset) {
+        return maxRisk(assetConcentrationRisk(largestPct, coreMajorAsset), chainConcentrationRisk(largestChainPct));
+    }
+
+    private String assetConcentrationRisk(double largestPct, boolean coreMajorAsset) {
+        if (coreMajorAsset) {
+            if (largestPct >= 80.0d) {
+                return "HIGH";
+            }
+            if (largestPct >= 65.0d) {
+                return "MEDIUM";
+            }
+            return "LOW";
+        }
+        if (largestPct >= 50.0d) {
             return "CRITICAL";
         }
-        if (largestPct >= 30.0d || largestChainPct >= 60.0d) {
+        if (largestPct >= 30.0d) {
             return "HIGH";
         }
-        if (largestPct >= 20.0d || largestChainPct >= 45.0d) {
+        if (largestPct >= 20.0d) {
             return "MEDIUM";
         }
         return "LOW";
+    }
+
+    private String chainConcentrationRisk(double largestChainPct) {
+        if (largestChainPct >= 80.0d) {
+            return "CRITICAL";
+        }
+        if (largestChainPct >= 60.0d) {
+            return "MEDIUM";
+        }
+        if (largestChainPct >= 45.0d) {
+            return "MEDIUM";
+        }
+        return "LOW";
+    }
+
+    private String maxRisk(String first, String second) {
+        return riskRank(first) >= riskRank(second) ? first : second;
+    }
+
+    private int riskRank(String risk) {
+        return switch (risk) {
+            case "CRITICAL" -> 4;
+            case "HIGH" -> 3;
+            case "MEDIUM" -> 2;
+            default -> 1;
+        };
     }
 
     private String healthLabel(int score) {
@@ -286,9 +358,6 @@ public class PortfolioAdvisorFallback {
         if (stablePct < 20.0d) {
             score -= (int) Math.round((20.0d - stablePct) * 2.0d);
         }
-        if (stablePct > 45.0d) {
-            score -= (int) Math.round(stablePct - 45.0d);
-        }
         if (defiPct > 40.0d) {
             score -= (int) Math.round((defiPct - 40.0d) * 1.5d);
         }
@@ -302,8 +371,40 @@ public class PortfolioAdvisorFallback {
         return clampToInt(100 - (int) Math.round(idleStableUsd / total * 100.0d * 2.0d), 0, 100);
     }
 
-    private int diversificationScore(double largestPct, double largestChainPct) {
-        return clampToInt(100 - (int) Math.round(largestPct * 1.2d + Math.max(largestChainPct - 35.0d, 0.0d) * 0.6d), 0, 100);
+    private int diversificationScore(double largestPct, double largestChainPct, boolean coreMajorAsset) {
+        double assetLoad = coreMajorAsset
+                ? Math.max(largestPct - 45.0d, 0.0d) * 0.8d
+                : largestPct * 1.2d;
+        return clampToInt(100 - (int) Math.round(assetLoad + Math.max(largestChainPct - 35.0d, 0.0d) * 0.6d), 0, 100);
+    }
+
+    private int concentrationPenalty(double largestPct, boolean coreMajorAsset) {
+        if (coreMajorAsset) {
+            return largestPct >= 80.0d ? 18 : largestPct >= 65.0d ? 8 : 0;
+        }
+        return largestPct >= 50.0d ? 32 : largestPct >= 30.0d ? 22 : largestPct >= 20.0d ? 10 : 0;
+    }
+
+    private boolean hasActionableAssetConcentration(double largestPct, boolean coreMajorAsset) {
+        return coreMajorAsset ? largestPct >= 70.0d : largestPct >= 30.0d;
+    }
+
+    private String assetConcentrationDetail(double largestUsd, boolean coreMajorAsset) {
+        if (coreMajorAsset) {
+            return "BTC/ETH exposure is core portfolio exposure, so the risk is sizing, not asset quality.";
+        }
+        return "A 20% drawdown there would hit net value by roughly " + money(largestUsd * 0.2d) + ".";
+    }
+
+    private boolean isCoreMajorAsset(String symbol) {
+        String normalized = symbol == null
+                ? ""
+                : symbol.trim().toUpperCase(Locale.US).replaceAll("[^A-Z0-9]", "");
+        return CORE_MAJOR_SYMBOLS.contains(normalized);
+    }
+
+    private String assetLabel(String symbol) {
+        return symbol == null || symbol.isBlank() ? "Largest asset" : symbol;
     }
 
     private double largestChainPct(PortfolioContext context) {

@@ -74,16 +74,28 @@ public class GeminiApiClient {
         }
     }
 
-    private String extractText(String responseBody) {
+    String extractText(String responseBody) {
         try {
             JsonNode root = objectMapper.readTree(responseBody);
-            String text = root.path("candidates")
-                    .path(0)
-                    .path("content")
-                    .path("parts")
-                    .path(0)
-                    .path("text")
-                    .asText(null);
+            JsonNode candidate = root.path("candidates").path(0);
+            String finishReason = candidate.path("finishReason").asText("");
+            if ("MAX_TOKENS".equalsIgnoreCase(finishReason)) {
+                throw new AiAdvisorException(
+                        "AI_RESPONSE_TRUNCATED",
+                        "AI response was truncated before completion. Retry the question or ask for fewer options.");
+            }
+
+            JsonNode parts = candidate.path("content").path("parts");
+            StringBuilder textBuilder = new StringBuilder();
+            if (parts.isArray()) {
+                for (JsonNode part : parts) {
+                    String partText = part.path("text").asText(null);
+                    if (partText != null && !partText.isBlank()) {
+                        textBuilder.append(partText);
+                    }
+                }
+            }
+            String text = textBuilder.toString();
             if (text == null || text.isBlank()) {
                 throw new AiAdvisorException("AI_EMPTY_RESPONSE", "Gemini returned an empty response");
             }
@@ -104,7 +116,7 @@ public class GeminiApiClient {
         static GeminiRequest from(
                 String systemPrompt,
                 List<GeminiMessage> messages,
-                int maxTokens,
+                Integer maxTokens,
                 boolean jsonResponse) {
             GenerationConfig generationConfig = jsonResponse
                     ? new GenerationConfig(maxTokens, 0.3d, "application/json")
@@ -128,6 +140,6 @@ public class GeminiApiClient {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    private record GenerationConfig(int maxOutputTokens, double temperature, String responseMimeType) {
+    private record GenerationConfig(Integer maxOutputTokens, double temperature, String responseMimeType) {
     }
 }

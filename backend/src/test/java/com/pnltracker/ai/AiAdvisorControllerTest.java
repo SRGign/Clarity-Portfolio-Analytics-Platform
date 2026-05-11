@@ -44,7 +44,7 @@ class AiAdvisorControllerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody()).containsKeys("healthScore", "healthLabel", "risks", "opportunities", "actions");
         assertThat(response.getBody().get("caveat")).asString()
-                .contains("Gemini quota was unavailable")
+                .isEqualTo("Not financial advice. Market rates and portfolio values can change.")
                 .doesNotContain("on-chain data");
     }
 
@@ -131,7 +131,10 @@ class AiAdvisorControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).containsKeys("healthScore", "healthLabel", "risks", "opportunities", "actions");
-        assertThat(response.getBody().get("caveat")).asString().contains("malformed JSON");
+        assertThat(response.getBody().get("caveat")).asString()
+                .isEqualTo("Not financial advice. Market rates and portfolio values can change.")
+                .doesNotContain("malformed JSON")
+                .doesNotContain("deterministic");
     }
 
     @Test
@@ -322,6 +325,62 @@ class AiAdvisorControllerTest {
                 .contains("**");
     }
 
+    @Test
+    void portfolioChatAppendsSafeCaveatWhenModelOmitsIt() {
+        PortfolioContextBuilder contextBuilder = mock(PortfolioContextBuilder.class);
+        GeminiApiClient geminiApiClient = mock(GeminiApiClient.class);
+        AiAdvisorController controller = new AiAdvisorController(
+                contextBuilder,
+                geminiApiClient,
+                new PortfolioAdvisorFallback(),
+                new ObjectMapper());
+
+        when(contextBuilder.build(List.of("0xabc"), List.of("base"))).thenReturn(sampleContext());
+        when(geminiApiClient.completeText(anyString(), any())).thenReturn("Keep the stables liquid for now.");
+
+        ResponseEntity<Map<String, Object>> response = controller.portfolioChat(
+                new AiAdvisorController.ChatRequest(
+                        List.of("0xabc"),
+                        List.of("base"),
+                        List.of(new AiAdvisorController.ChatMessage("user", "what should I do?"))));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().get("reply")).asString()
+                .isEqualTo("Keep the stables liquid for now.\n\nNot financial advice. Market rates and portfolio values can change.");
+    }
+
+    @Test
+    void fallbackDoesNotPenalizeHighStableAllocation() {
+        Map<String, Object> summary = new PortfolioAdvisorFallback().summarize(sampleContextWithStableAllocation(80.0d));
+
+        assertThat(summary).containsEntry("healthScore", 88);
+        assertThat(summary.get("metrics")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("liquidityScore", 100);
+    }
+
+    @Test
+    void fallbackDoesNotTreatCoreMajorsAboveThirtyAsHighRisk() {
+        PortfolioAdvisorFallback fallback = new PortfolioAdvisorFallback();
+
+        assertCoreMajorSummary(fallback.summarize(sampleContextWithLargestPosition("ETH", 45.0d)));
+        assertCoreMajorSummary(fallback.summarize(sampleContextWithLargestPosition("BTC", 45.0d)));
+    }
+
+    private static void assertCoreMajorSummary(Map<String, Object> summary) {
+        assertThat(summary).containsEntry("healthScore", 88);
+        assertThat(summary.get("metrics")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("concentrationRisk", "LOW")
+                .containsEntry("diversificationScore", 100);
+        assertThat(summary.get("risks")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.LIST)
+                .allSatisfy(risk -> assertThat(((Map<?, ?>) risk).get("title"))
+                        .isNotIn("Asset concentration", "Core asset size"));
+        assertThat(summary.get("actions")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.LIST)
+                .allSatisfy(action -> assertThat(((Map<?, ?>) action).get("action"))
+                        .asString()
+                        .doesNotStartWith("Trim "));
+    }
+
     private static PortfolioContext sampleContext() {
         return sampleContext(List.of());
     }
@@ -378,5 +437,62 @@ class AiAdvisorControllerTest {
                 500.0d,
                 null,
                 stableYieldMarket);
+    }
+
+    private static PortfolioContext sampleContextWithStableAllocation(double stablePct) {
+        double total = 10_000.0d;
+        double stableUsd = total * stablePct / 100.0d;
+        return new PortfolioContext(
+                total,
+                1,
+                List.of(
+                        new ChainAllocation("base", "Base", BigDecimal.valueOf(total / 2.0d)),
+                        new ChainAllocation("ethereum", "Ethereum", BigDecimal.valueOf(total / 2.0d))),
+                List.of(
+                        new TokenExposure("USDC", stableUsd, stableUsd, 0.0d, stablePct),
+                        new TokenExposure("ETH", total - stableUsd, total - stableUsd, 0.0d, 100.0d - stablePct)),
+                List.of(),
+                List.of(),
+                0.0d,
+                stableUsd,
+                stableUsd,
+                stablePct,
+                0.0d,
+                "ETH",
+                19.0d,
+                0.0d,
+                null,
+                StableYieldMarket.empty("DeFiLlama Yields"));
+    }
+
+    private static PortfolioContext sampleContextWithLargestPosition(String symbol, double largestPct) {
+        double total = 10_000.0d;
+        double largestUsd = total * largestPct / 100.0d;
+        double stablePct = 20.0d;
+        double stableUsd = total * stablePct / 100.0d;
+        double thirdAssetUsd = total - largestUsd - stableUsd;
+        return new PortfolioContext(
+                total,
+                3,
+                List.of(
+                        new ChainAllocation("ethereum", "Ethereum", new BigDecimal("3400")),
+                        new ChainAllocation("bitcoin", "Bitcoin", new BigDecimal("3300")),
+                        new ChainAllocation("solana", "Solana", new BigDecimal("3300"))),
+                List.of(
+                        new TokenExposure(symbol, largestUsd, largestUsd, 0.0d, largestPct),
+                        new TokenExposure("USDC", stableUsd, stableUsd, 0.0d, stablePct),
+                        new TokenExposure("SOL", thirdAssetUsd, thirdAssetUsd, 0.0d, 100.0d - largestPct - stablePct)),
+                List.of(),
+                List.of(),
+                0.0d,
+                stableUsd,
+                stableUsd,
+                stablePct,
+                0.0d,
+                symbol,
+                largestPct,
+                0.0d,
+                null,
+                StableYieldMarket.empty("DeFiLlama Yields"));
     }
 }
